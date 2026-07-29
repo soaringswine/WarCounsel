@@ -6,6 +6,7 @@ written to .env — you can change any answer later by editing that file.
 Run me directly (python setup_wizard.py) or via install_companion.bat.
 """
 import re
+import shutil
 import string
 import sys
 import tempfile
@@ -181,6 +182,10 @@ def choose_llm() -> dict:
     say("  2. LM Studio       - free local models (needs LM Studio running)")
     say("  3. OpenAI          - best quality (needs an API key)")
     say("  4. Custom endpoint - Groq / OpenRouter / any OpenAI-compatible URL")
+    say("  5. Claude Code CLI - your Claude subscription, no API key")
+    say("                       (needs `claude` installed and logged in)")
+    say("  6. Codex CLI       - your ChatGPT subscription, no API key")
+    say("                       (needs `codex` installed and logged in)")
     pick = ask("Choice", "1")
     env = {}
     if pick == "2":
@@ -196,6 +201,20 @@ def choose_llm() -> dict:
         env["CUSTOM_BASE_URL"] = ask("Base URL (e.g. https://api.groq.com/openai/v1)")
         env["CUSTOM_API_KEY"] = ask("API key (blank if none needed)")
         env["CUSTOM_MODEL"] = ask("Model id")
+    elif pick == "5":
+        env["LLM_PROVIDER"] = "claude_cli"
+        if not shutil.which("claude"):
+            say("  NOTE: `claude` was not found on PATH — install Claude Code")
+            say("  and log in, or set CLAUDE_CLI=<full path> in .env.")
+        env["CLAUDE_CLI_MODEL"] = ask("Model", "claude-opus-5")
+        env["CLAUDE_CLI_EFFORT"] = ask("Reasoning effort (low/medium/high/xhigh/max)", "high")
+    elif pick == "6":
+        env["LLM_PROVIDER"] = "codex_cli"
+        if not shutil.which("codex"):
+            say("  NOTE: `codex` was not found on PATH — install the Codex CLI")
+            say("  and log in, or set CODEX_CLI=<full path> in .env.")
+        env["CODEX_CLI_MODEL"] = ask("Model (blank = codex's own default)")
+        env["CODEX_CLI_EFFORT"] = ask("Reasoning effort (minimal/low/medium/high/xhigh)", "high")
     else:
         env["LLM_PROVIDER"] = "none"
     return env

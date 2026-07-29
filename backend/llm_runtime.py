@@ -54,6 +54,11 @@ def model_for(provider: str) -> str:
         return cfg.get("ollama_model") or settings.ollama_model
     if provider == "anthropic":
         return cfg.get("anthropic_model") or settings.anthropic_model
+    if provider == "claude_cli":
+        return cfg.get("claude_cli_model") or settings.claude_cli_model
+    if provider == "codex_cli":
+        # empty means "whatever codex itself is configured with"
+        return cfg.get("codex_cli_model") or settings.codex_cli_model or "default"
     return settings.model                      # lmstudio
 
 
@@ -63,13 +68,40 @@ def active() -> dict:
     return {"provider": provider, "model": model_for(provider)}
 
 
+# The 2nd/3rd check slots on the Advisor tab. ANY provider can sit in any
+# slot — LM Studio primary with Claude CLI 2nd and Codex CLI 3rd, or Codex
+# primary with LM Studio 2nd and Claude 3rd. "none" disables a slot.
+_CHECK_SLOTS = ("second", "third")
+_CHECK_DEFAULTS = {"second": "claude_cli", "third": "none"}
+
+
+def checks() -> dict:
+    cfg = _load().get("checks") or {}
+    return {s: cfg.get(s) or _CHECK_DEFAULTS[s] for s in _CHECK_SLOTS}
+
+
+def set_checks(second: str | None = None, third: str | None = None) -> dict:
+    cfg = _load()
+    slots = cfg.get("checks") or {}
+    if second is not None:
+        slots["second"] = second.strip()
+    if third is not None:
+        slots["third"] = third.strip()
+    cfg["checks"] = slots
+    _CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    _CONFIG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    logger.info("Check slots set to %s", checks())
+    return checks()
+
+
 def set_active(provider: str, model: str | None = None) -> dict:
     cfg = _load()
     cfg["provider"] = provider
     # Persist per provider, or switching away and back loses the choice.
     per_provider = {"openai": "openai_model", "custom": "custom_model",
                     "local": "ollama_model", "anthropic": "anthropic_model",
-                    "lmstudio": "model"}
+                    "lmstudio": "model", "claude_cli": "claude_cli_model",
+                    "codex_cli": "codex_cli_model"}
     key = per_provider.get(provider)
     if key and model:
         cfg[key] = model.strip()
@@ -80,10 +112,38 @@ def set_active(provider: str, model: str | None = None) -> dict:
     return active()
 
 
+class _CliChat:
+    """Duck-typed stand-in for a langchain chat model, backed by a coding-
+    agent CLI (Claude Code / Codex). Implements exactly what this codebase
+    uses on the get_llm() seam — `await .ainvoke(messages)` returning an
+    object with `.content`, and `.bind(**kw)` as a no-op — so the advisor,
+    gear and chat paths need no branches. Every call is one fresh CLI
+    subprocess; auth is the CLI's own login (subscription), no key here."""
+
+    def __init__(self, provider: str, model: str):
+        self.provider, self.model = provider, model
+
+    def bind(self, **_):
+        return self  # max_tokens etc. are the CLI's own business
+
+    async def ainvoke(self, messages):
+        from types import SimpleNamespace
+        from backend import cli_llm
+        prompt = "\n\n".join(
+            str(getattr(m, "content", m)) for m in messages
+            if str(getattr(m, "content", m)).strip())
+        text, _meta = await cli_llm.arun(self.provider, prompt,
+                                         model=self.model)
+        return SimpleNamespace(content=text, additional_kwargs={},
+                               response_metadata={})
+
+
 def _build(provider: str, model: str):
     if provider == "none":
         raise RuntimeError("deterministic mode has no chat model — callers "
                            "must branch on active()['provider'] first")
+    if provider in ("claude_cli", "codex_cli"):
+        return _CliChat(provider, model)
     if provider == "custom":
         # any OpenAI-compatible endpoint: Groq, OpenRouter, Together,
         # Gemini's compat layer, a friend's LM Studio over LAN, ...
@@ -133,7 +193,7 @@ def _build(provider: str, model: str):
     # instead — the advisor catches this and drops to the built-in path.
     raise RuntimeError(
         f"unknown LLM provider {provider!r} — expected none|lmstudio|openai|"
-        "custom|local|anthropic")
+        "custom|local|anthropic|claude_cli|codex_cli")
 
 
 def available() -> dict:
@@ -157,6 +217,8 @@ def available() -> dict:
         except (ImportError, ValueError):
             return False
 
+    from backend import cli_llm
+
     openai_stack = has("langchain_openai")
     return {
         "none": True,                    # the built-in advisor, always there
@@ -165,6 +227,8 @@ def available() -> dict:
         "custom": openai_stack,
         "anthropic": has("langchain_anthropic"),
         "local": has("langchain_ollama"),
+        # the CLIs need no Python client at all — just their executable
+        **cli_llm.available(),
     }
 
 
@@ -226,6 +290,16 @@ def probe(provider: str | None = None) -> dict:
             data = get(base + "/models")
             out["models"] = [m.get("id") for m in data.get("data", [])]
             out["reachable"] = True
+        elif provider in ("claude_cli", "codex_cli"):
+            # `<cli> --version`: proves the executable exists and answers.
+            # Free for both CLIs — no paid request, no login round-trip.
+            from backend import cli_llm
+            ver = cli_llm.version(provider)
+            out["reachable"] = ver is not None
+            out["models"] = [model_for(provider)]
+            out["reason"] = (ver if ver else
+                             f"{cli_llm.LABELS[provider]} not found or not "
+                             "answering --version — install it and log in")
         else:
             # A cloud key cannot be verified without spending a request, and
             # "none" has nothing to reach.
@@ -250,8 +324,13 @@ def clear_cache() -> None:
         _cache.clear()
 
 
-def get_llm():
-    a = active()
+def get_llm(provider: str | None = None):
+    """The chat model for the ACTIVE provider, or for an explicit one —
+    the check slots review with providers that are not active."""
+    if provider is None:
+        a = active()
+    else:
+        a = {"provider": provider, "model": model_for(provider)}
     key = (a["provider"], a["model"])
     with _lock:
         if key not in _cache:

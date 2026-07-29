@@ -433,16 +433,20 @@ export interface DoubleCheckIssue {
   unmatched?: boolean;
 }
 
-/** Second opinion on the counsel from a one-off Claude Code CLI run
- *  (stronger model, high reasoning effort). Rides the advice cache: it
- *  restores with the counsel and dies with it on the next consult. */
+/** Second/third opinion on the counsel. Each check slot can be ANY
+ *  provider — a coding-agent CLI (claude_cli/codex_cli, subscription auth)
+ *  or an API/local provider. Rides the advice cache: reviews restore with
+ *  the counsel and die with it on the next consult. */
 export interface DoubleCheck {
+  slot: "second" | "third";
+  provider: string;
   verdict: "sound" | "minor_issues" | "major_issues";
   summary: string | null;
   issues: DoubleCheckIssue[];
   endorsements: string[];
   model: string;
-  effort: string;
+  /** reasoning effort — CLI providers only, null for API/local ones */
+  effort: string | null;
   duration_s: number;
   cost_usd: number | null;
   generated: string;
@@ -451,7 +455,7 @@ export interface DoubleCheck {
 export interface Advice {
   stale?: boolean;
   purchase?: PurchaseItem[];
-  doublecheck?: DoubleCheck;
+  doublechecks?: { second?: DoubleCheck; third?: DoubleCheck };
   source: "llm" | "builtin";
   grounding: "wiki" | "memory";
   generated: string;
@@ -520,6 +524,8 @@ export interface LlmOption {
 export interface LlmInfo {
   active: { provider: string; model: string };
   options?: LlmOption[];
+  /** which provider sits in each check slot ("none" = slot disabled) */
+  checks?: { second: string; third: string };
   openai_key_set: boolean;
 }
 

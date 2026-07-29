@@ -145,14 +145,16 @@ class Settings(BaseSettings):
     custom_api_key: str = ""                  # (Groq, OpenRouter, Gemini, ...)
     custom_model: str = ""
 
-    # Advisor double-check: one-off `claude -p` runs against the Claude Code
-    # CLI (subscription auth — no API key involved). Independent of the
-    # provider selector above on purpose: it is a second opinion on the
-    # counsel that selector produced.
+    # Coding-agent CLIs as LLM backends (subscription auth — no API key in
+    # the app). Selectable as the MAIN advisor (llm_provider=claude_cli|
+    # codex_cli) and as the 2nd/3rd check slots on the Advisor tab.
     claude_cli: str = "claude"                # path to claude / claude.exe
-    doublecheck_model: str = "claude-opus-5"
-    doublecheck_effort: str = "high"          # low|medium|high|xhigh|max
-    doublecheck_timeout_s: int = 600          # Opus at high effort can think a while
+    claude_cli_model: str = "claude-opus-5"
+    claude_cli_effort: str = "high"           # low|medium|high|xhigh|max
+    codex_cli: str = "codex"                  # path to codex / codex.exe
+    codex_cli_model: str = ""                 # empty = the codex default model
+    codex_cli_effort: str = "high"            # minimal|low|medium|high|xhigh
+    cli_timeout_s: int = 600                  # strong models at high effort think a while
 
     # Database
     database_url: str = _DEFAULT_DB_URL
