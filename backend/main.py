@@ -1036,7 +1036,9 @@ async def run_update():
 
 @app.get("/api/llm")
 async def api_llm_get():
-    from backend.llm_runtime import active, custom_model, openai_model
+    from backend import cli_llm
+    from backend.llm_runtime import (active, checks, custom_model,
+                                     model_for, openai_model)
     options = [
         {"provider": "none", "model": "builtin",
          "label": "None — deterministic (no LLM)"},
@@ -1052,9 +1054,16 @@ async def api_llm_get():
     if settings.custom_base_url:
         options.append({"provider": "custom", "model": custom_model(),
                         "label": f"Custom — {custom_model()}"})
+    # coding-agent CLIs: offered only when the executable is actually
+    # installed — a selector entry that can never work is a support ticket
+    for p, installed in cli_llm.available().items():
+        if installed:
+            options.append({"provider": p, "model": model_for(p),
+                            "label": f"{cli_llm.LABELS[p]} — {model_for(p)}"})
     return {
         "active": active(),
         "options": options,
+        "checks": checks(),
         "openai_key_set": bool(settings.openai_api_key),
     }
 
@@ -1073,23 +1082,45 @@ async def api_llm_probe(provider: Optional[str] = None):
     return await asyncio.to_thread(probe, provider)
 
 
+LLM_PROVIDERS = ("none", "lmstudio", "openai", "custom", "local",
+                 "anthropic", "claude_cli", "codex_cli")
+
+
 @app.post("/api/llm")
 async def api_llm_set(body: dict):
     """Switch the counsel model (Advisor tab). Clears the advice caches so
     the next consult regenerates with the newly selected model."""
     from backend.llm_runtime import active, set_active
     provider = (body.get("provider") or "").strip()
-    if provider not in ("none", "lmstudio", "openai", "custom", "local",
-                        "anthropic"):
+    if provider not in LLM_PROVIDERS:
         raise HTTPException(
-            400,
-            "provider must be none|lmstudio|openai|custom|local|anthropic")
+            400, "provider must be " + "|".join(LLM_PROVIDERS))
     global _advice_cache, _gear_cache
     set_active(provider, body.get("model"))
     _advice_cache = None
     _gear_cache = None
     _save_advice_cache()
     return {"active": active(), "openai_key_set": bool(settings.openai_api_key)}
+
+
+@app.post("/api/llm/checks")
+async def api_llm_checks_set(body: dict):
+    """Assign providers to the 2nd/3rd check slots. Any provider fits any
+    slot ("none" disables one); existing check results are kept — each
+    review records which provider produced it, so a slot change does not
+    retroactively falsify anything."""
+    from backend.llm_runtime import checks, set_checks
+    vals = {}
+    for slot in ("second", "third"):
+        if slot in body:
+            v = str(body.get(slot) or "none").strip()
+            if v not in LLM_PROVIDERS:
+                raise HTTPException(
+                    400, f"{slot} must be " + "|".join(LLM_PROVIDERS))
+            vals[slot] = v
+    if not vals:
+        raise HTTPException(400, "send at least one of: second, third")
+    return set_checks(vals.get("second"), vals.get("third"))
 
 
 def _describe_game_dir(path: str) -> dict:
@@ -1137,6 +1168,8 @@ async def api_settings_get():
             "ollama_base_url": settings.ollama_base_url,
             "ollama_model": settings.ollama_model,
             "anthropic_model": settings.anthropic_model,
+            "claude_cli_model": settings.claude_cli_model,
+            "codex_cli_model": settings.codex_cli_model,
             "keys_set": which_are_set(),
             "available": available(),
         },
@@ -1194,7 +1227,9 @@ async def api_settings_set(body: dict):
 
     if "llm_provider" in config_in:
         set_active(str(config_in["llm_provider"]),
-                   config_in.get("openai_model") or config_in.get("custom_model"))
+                   config_in.get("openai_model") or config_in.get("custom_model")
+                   or config_in.get("claude_cli_model")
+                   or config_in.get("codex_cli_model"))
         global _advice_cache, _gear_cache
         _advice_cache = None
         _gear_cache = None
@@ -1303,13 +1338,18 @@ async def get_advisor(refresh: bool = False, cached: bool = False):
 
 
 @app.post("/api/advisor/doublecheck")
-async def advisor_doublecheck():
-    """Second opinion on the CURRENT counsel: one `claude -p` run (Opus,
-    high effort by default) reviewing the advice against the exact briefing
-    the advisor saw. Button-press only, like the consults. The review rides
-    _advice_cache["doublecheck"], so it restores with the counsel and dies
-    with it on the next consult; failures return 502 and are never cached."""
+async def advisor_doublecheck(body: dict | None = None):
+    """Run one check slot ("second" default, or "third") on the CURRENT
+    counsel: the slot's configured provider reviews the advice against the
+    exact briefing the advisor saw. Button-press only, like the consults.
+    The third check also sees the second's review and is asked to agree or
+    disagree. Reviews ride _advice_cache["doublechecks"], so they restore
+    with the counsel and die with it on the next consult; failures return
+    502 and are never cached."""
     global _advice_cache
+    slot = str((body or {}).get("slot") or "second").strip()
+    if slot not in ("second", "third"):
+        raise HTTPException(400, "slot must be second|third")
     if _advice_cache is None:
         raise HTTPException(409, "No counsel to double-check — press "
                                  "Consult first.")
@@ -1318,10 +1358,19 @@ async def advisor_doublecheck():
         raise HTTPException(409, "This counsel predates double-checking — "
                                  "press Consult once to refresh it first.")
     from backend.agent.doublecheck import run_doublecheck
-    review = await run_doublecheck(_advice_cache["_prompt"], _advice_cache)
+    from backend.llm_runtime import checks
+    provider = checks().get(slot, "none")
+    if provider == "none":
+        raise HTTPException(409, f"No model assigned to the {slot} check — "
+                                 "pick one in its selector.")
+    reviews = dict(_advice_cache.get("doublechecks") or {})
+    prior = reviews.get("second") if slot == "third" else None
+    review = await run_doublecheck(_advice_cache["_prompt"], _advice_cache,
+                                   provider, slot, prior)
     if review.get("error"):
         raise HTTPException(502, review["error"])
-    _advice_cache = {**_advice_cache, "doublecheck": review}
+    reviews[slot] = review
+    _advice_cache = {**_advice_cache, "doublechecks": reviews}
     _save_advice_cache()
     return review
 

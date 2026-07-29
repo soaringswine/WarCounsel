@@ -13,6 +13,23 @@ const CLASSES = [
 
 const TRIO_LABELS = ["Primary", "Secondary", "Tertiary"] as const;
 
+/** Providers whose model id is editable inline next to the selector. */
+const MODEL_EDIT_PROVIDERS = ["openai", "custom", "claude_cli", "codex_cli"];
+
+const MODEL_FIELD_LABEL: Record<string, string> = {
+  openai: "OpenAI model",
+  custom: "Custom model",
+  claude_cli: "Claude CLI model",
+  codex_cli: "Codex CLI model",
+};
+
+const MODEL_FIELD_HINT: Record<string, string> = {
+  openai: "o3",
+  custom: "model id",
+  claude_cli: "claude-opus-5",
+  codex_cli: "blank = codex default",
+};
+
 const HG_TICKS = [10, 20, 30, 40, 50, 60];
 const HG_MIN = 1;
 const HG_MAX = 65;
@@ -142,7 +159,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [advice, setAdvice] = useState<Advice | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dcLoading, setDcLoading] = useState(false);
+  const [dcBusy, setDcBusy] = useState<"second" | "third" | null>(null);
   const [dcError, setDcError] = useState<string | null>(null);
   const [aaDraft, setAaDraft] = useState("");
   const [slotsDraft, setSlotsDraft] = useState("");
@@ -181,7 +198,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
       .then((info) => {
         setLlm(info);
         setLlmModelDraft(
-          info.active.provider === "openai" || info.active.provider === "custom"
+          MODEL_EDIT_PROVIDERS.includes(info.active.provider)
             ? info.active.model
             : "",
         );
@@ -193,7 +210,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     try {
       const r = await apiSend<LlmInfo>("/api/llm", { provider, model }, "POST");
       setLlm((prev) => ({ ...(prev ?? r), ...r }));
-      if (provider === "openai" || provider === "custom") setLlmModelDraft(r.active.model);
+      if (MODEL_EDIT_PROVIDERS.includes(provider)) setLlmModelDraft(r.active.model);
     } catch {
       /* backend offline */
     }
@@ -322,22 +339,37 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     }
   }, []);
 
-  // One-off `claude -p` run (stronger model, high effort) reviewing the
-  // displayed counsel against the advisor's exact briefing. Button-press
-  // only, like the consults; the result rides the advice cache.
-  const doubleCheck = async () => {
-    setDcLoading(true);
+  // Run one check slot: its provider (any — a coding-agent CLI or an
+  // API/local model) reviews the displayed counsel against the advisor's
+  // exact briefing. The 3rd check also sees the 2nd's review. Button-press
+  // only, like the consults; results ride the advice cache.
+  const doubleCheck = async (slot: "second" | "third") => {
+    setDcBusy(slot);
     setDcError(null);
     try {
-      const r = await apiSend<DoubleCheck>("/api/advisor/doublecheck", {});
-      setAdvice((a) => (a ? { ...a, doublecheck: r } : a));
+      const r = await apiSend<DoubleCheck>("/api/advisor/doublecheck", { slot });
+      setAdvice((a) =>
+        a ? { ...a, doublechecks: { ...a.doublechecks, [slot]: r } } : a,
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // FastAPI wraps the reason as {"detail": "..."} — unwrap for display
       const m = msg.match(/"detail"\s*:\s*"([^"]+)"/);
       setDcError(m ? m[1] : msg);
     } finally {
-      setDcLoading(false);
+      setDcBusy(null);
+    }
+  };
+
+  // Assign a provider to a check slot; "none" disables it. Existing
+  // reviews stay — each records the provider that produced it.
+  const setCheckSlot = async (slot: "second" | "third", provider: string) => {
+    try {
+      const r = await apiSend<{ second: string; third: string }>(
+        "/api/llm/checks", { [slot]: provider });
+      setLlm((prev) => (prev ? { ...prev, checks: r } : prev));
+    } catch {
+      /* backend offline */
     }
   };
 
@@ -470,16 +502,16 @@ export const AdvisorPanel = memo(function AdvisorPanel({
             ))}
           </select>
         </div>
-        {(llm?.active.provider === "openai" || llm?.active.provider === "custom") && (
+        {llm && MODEL_EDIT_PROVIDERS.includes(llm.active.provider) && (
           <div className="adv-field">
             <label htmlFor="adv-llm-model">
-              {llm.active.provider === "openai" ? "OpenAI model" : "Custom model"}
+              {MODEL_FIELD_LABEL[llm.active.provider]}
             </label>
             <input
               id="adv-llm-model"
               type="text"
-              value={llmModelDraft}
-              placeholder={llm.active.provider === "openai" ? "o3" : "model id"}
+              value={llmModelDraft === "default" ? "" : llmModelDraft}
+              placeholder={MODEL_FIELD_HINT[llm.active.provider]}
               onChange={(e) => setLlmModelDraft(e.target.value)}
               onBlur={() =>
                 llmModelDraft.trim() && switchLlm(llm.active.provider, llmModelDraft.trim())
@@ -571,75 +603,105 @@ export const AdvisorPanel = memo(function AdvisorPanel({
 
             <div className="adv-dc">
               <div className="adv-dc-bar">
-                {advice.doublecheck && (
-                  <span className="adv-dc-verdict" data-v={advice.doublecheck.verdict}>
-                    {advice.doublecheck.verdict.replace("_", " ")}
-                  </span>
-                )}
                 <span className="adv-dc-title">
-                  {advice.doublecheck
-                    ? `second opinion — ${advice.doublecheck.model} · ${advice.doublecheck.effort} effort · ${advice.doublecheck.duration_s}s` +
-                      (advice.doublecheck.cost_usd ? ` · $${advice.doublecheck.cost_usd.toFixed(2)}` : "")
-                    : "Second opinion: have a stronger model re-derive this counsel from the same data."}
+                  Second opinions — another model re-derives this counsel from
+                  the exact data the advisor saw. The 3rd check also weighs the
+                  2nd&apos;s findings.
                 </span>
-                <button
-                  type="button"
-                  className="adv-rescan adv-gear-btn adv-dc-btn"
-                  onClick={doubleCheck}
-                  disabled={dcLoading || loading}
-                  title="One-off `claude -p` run: Opus at high reasoning effort reviews these picks against the exact briefing the advisor saw. Needs Claude Code installed and logged in; can take a few minutes."
-                >
-                  {dcLoading
-                    ? "double-checking…"
-                    : advice.doublecheck ? "double-check again" : "double-check (Opus)"}
-                </button>
+                {(["second", "third"] as const).map((slot) => (
+                  <span key={slot} className="adv-dc-slot">
+                    <label htmlFor={`adv-dc-${slot}`}>
+                      {slot === "second" ? "2nd" : "3rd"}
+                    </label>
+                    <select
+                      id={`adv-dc-${slot}`}
+                      value={llm?.checks?.[slot] ?? (slot === "second" ? "claude_cli" : "none")}
+                      onChange={(e) => setCheckSlot(slot, e.target.value)}
+                      title="Any model can sit in any check slot — coding-agent CLIs (subscription auth) or the API/local providers"
+                    >
+                      <option value="none">none</option>
+                      {(llm?.options ?? [])
+                        .filter((o) => o.provider !== "none")
+                        .map((o) => (
+                          <option key={o.provider} value={o.provider}>{o.label}</option>
+                        ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="adv-rescan adv-gear-btn adv-dc-btn"
+                      onClick={() => doubleCheck(slot)}
+                      disabled={
+                        dcBusy !== null || loading ||
+                        (llm?.checks?.[slot] ?? (slot === "second" ? "claude_cli" : "none")) === "none"
+                      }
+                      title="Reviews the picks against the exact briefing the advisor saw. CLI models need their tool installed and logged in; strong models at high effort can take minutes."
+                    >
+                      {dcBusy === slot
+                        ? "checking…"
+                        : advice.doublechecks?.[slot] ? "re-run" : "run"}
+                    </button>
+                  </span>
+                ))}
               </div>
-              {dcLoading && (
+              {dcBusy && (
                 <div className="adv-gear-loading" role="status" aria-live="polite">
                   <span className="adv-gear-spin" aria-hidden />
-                  Double-checking — Opus is re-deriving the counsel from the
-                  briefing… (high effort; this can take a few minutes)
+                  Running the {dcBusy === "second" ? "2nd" : "3rd"} check —
+                  re-deriving the counsel from the briefing… (strong models at
+                  high effort can take a few minutes)
                 </div>
               )}
               {dcError && <p className="adv-dc-error" role="alert">{dcError}</p>}
-              {advice.doublecheck && !dcLoading && (
-                <>
-                  {advice.doublecheck.summary && (
-                    <p className="adv-dc-summary">{advice.doublecheck.summary}</p>
-                  )}
-                  {advice.doublecheck.issues.length > 0 && (
-                    <ul className="adv-list adv-dc-issues">
-                      {advice.doublecheck.issues.map((iss, i) => (
-                        <li key={i} data-dim={iss.unmatched || undefined}>
-                          <span className="adv-dc-sev" data-sev={iss.severity}>
-                            {iss.severity}
-                          </span>{" "}
-                          <span className="adv-cls">[{iss.section}]</span>{" "}
-                          <strong>{iss.item}</strong>
-                          {iss.unmatched && (
-                            <span className="adv-cls">
-                              {" "}(names something not in the counsel above)
-                            </span>
-                          )}
-                          <br />
-                          {iss.problem}
-                          {iss.fix && (
-                            <>
-                              <br />
-                              <span className="adv-dc-fix">fix: {iss.fix}</span>
-                            </>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {advice.doublecheck.endorsements.length > 0 && (
-                    <p className="adv-dc-endorse">
-                      Confirmed right: {advice.doublecheck.endorsements.join(" · ")}
-                    </p>
-                  )}
-                </>
-              )}
+              {(["second", "third"] as const).map((slot) => {
+                const dc = advice.doublechecks?.[slot];
+                if (!dc || dcBusy === slot) return null;
+                return (
+                  <div key={slot} className="adv-dc-review">
+                    <div className="adv-dc-bar">
+                      <span className="adv-dc-verdict" data-v={dc.verdict}>
+                        {dc.verdict.replace("_", " ")}
+                      </span>
+                      <span className="adv-dc-title">
+                        {slot === "second" ? "2nd" : "3rd"} check — {dc.model}
+                        {dc.effort ? ` · ${dc.effort} effort` : ""} · {dc.duration_s}s
+                        {dc.cost_usd ? ` · $${dc.cost_usd.toFixed(2)}` : ""}
+                      </span>
+                    </div>
+                    {dc.summary && <p className="adv-dc-summary">{dc.summary}</p>}
+                    {dc.issues.length > 0 && (
+                      <ul className="adv-list adv-dc-issues">
+                        {dc.issues.map((iss, i) => (
+                          <li key={i} data-dim={iss.unmatched || undefined}>
+                            <span className="adv-dc-sev" data-sev={iss.severity}>
+                              {iss.severity}
+                            </span>{" "}
+                            <span className="adv-cls">[{iss.section}]</span>{" "}
+                            <strong>{iss.item}</strong>
+                            {iss.unmatched && (
+                              <span className="adv-cls">
+                                {" "}(names something not in the counsel above)
+                              </span>
+                            )}
+                            <br />
+                            {iss.problem}
+                            {iss.fix && (
+                              <>
+                                <br />
+                                <span className="adv-dc-fix">fix: {iss.fix}</span>
+                              </>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {dc.endorsements.length > 0 && (
+                      <p className="adv-dc-endorse">
+                        Confirmed right: {dc.endorsements.join(" · ")}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             {advice.loadout.length + advice.nice_to_have.length > 0 && (

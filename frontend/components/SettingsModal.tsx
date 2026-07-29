@@ -43,6 +43,8 @@ type SettingsData = {
     ollama_base_url: string;
     ollama_model: string;
     anthropic_model: string;
+    claude_cli_model: string;
+    codex_cli_model: string;
     keys_set: Record<string, boolean>;
     available: Record<string, boolean>;
   };
@@ -55,6 +57,8 @@ const PROVIDERS = [
   { id: "openai", label: "OpenAI" },
   { id: "anthropic", label: "Anthropic — Claude" },
   { id: "custom", label: "Custom — OpenAI-compatible (Grok, Groq, OpenRouter…)" },
+  { id: "claude_cli", label: "Claude Code CLI — subscription login, no key" },
+  { id: "codex_cli", label: "Codex CLI — ChatGPT subscription login, no key" },
 ];
 
 /** Which secret field a provider needs, or null when it needs none. */
@@ -141,6 +145,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         setModel(
           d.llm.active.provider === "custom" ? d.llm.custom_model
           : d.llm.active.provider === "local" ? d.llm.ollama_model
+          : d.llm.active.provider === "claude_cli" ? d.llm.claude_cli_model
+          : d.llm.active.provider === "codex_cli" ? d.llm.codex_cli_model
           : d.llm.openai_model,
         );
         setOllamaUrl(d.llm.ollama_base_url ?? "");
@@ -201,6 +207,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         : next === "local" ? data.llm.ollama_model
         : next === "anthropic" ? data.llm.anthropic_model
         : next === "openai" ? data.llm.openai_model
+        : next === "claude_cli" ? data.llm.claude_cli_model
+        : next === "codex_cli" ? data.llm.codex_cli_model
         : "",
       );
     },
@@ -243,6 +251,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         body.ollama_model = model;
         body.ollama_base_url = ollamaUrl.trim();
       }
+      if (provider === "claude_cli") body.claude_cli_model = model;
+      if (provider === "codex_cli") body.codex_cli_model = model;
       // Only send a key when one was typed. Omitting it leaves whatever is
       // stored untouched — saving the game folder must never wipe a key.
       const field = keyFieldFor(provider);
@@ -419,6 +429,38 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   Counsel comes from the built-in deterministic advisor. Nothing
                   leaves your PC.
                 </p>
+              )}
+              {(provider === "claude_cli" || provider === "codex_cli") && (
+                <>
+                  <div className="set-row">
+                    <input
+                      value={model}
+                      spellCheck={false}
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder={provider === "claude_cli"
+                        ? "claude-opus-5"
+                        : "model (blank = codex default)"}
+                      aria-label="CLI model"
+                    />
+                  </div>
+                  <ProbeRow
+                    provider={provider}
+                    probe={probe}
+                    probing={probing}
+                    onCheck={() => runProbe(provider)}
+                  />
+                  <p className="set-note">
+                    Runs the {provider === "claude_cli" ? "Claude Code" : "Codex"}{" "}
+                    CLI as a one-off subprocess per consult — it uses its own{" "}
+                    {provider === "claude_cli" ? "Claude" : "ChatGPT"} subscription
+                    login, so no API key is stored here. Install it and log in
+                    once from a terminal first. Reasoning effort is set in{" "}
+                    <code>.env</code> ({provider === "claude_cli"
+                      ? "CLAUDE_CLI_EFFORT"
+                      : "CODEX_CLI_EFFORT"}, default high). Strong models at
+                    high effort can take minutes per consult.
+                  </p>
+                </>
               )}
               {provider === "lmstudio" && (
                 <>

@@ -1,48 +1,38 @@
-"""Second-opinion double-check of the advisor's counsel via the Claude Code
-CLI (`claude -p`) — one-off, non-interactive, subscription-authed.
+"""Second/third-opinion checks of the advisor's counsel.
 
-Deliberately NOT a provider in llm_runtime: the point is a second opinion
-from a *stronger* model (Opus at high reasoning effort) on what the
-configured advisor model produced, triggered per press, never automatic.
-The CLI is used instead of the Anthropic API so a Claude Code subscription
-covers it with no API key in the app.
+Two CHECK SLOTS ("second" and "third", llm_runtime.checks()) each hold ANY
+provider — a coding-agent CLI (claude_cli / codex_cli, one-off subprocess
+on its own subscription login) or any API/local provider from the runtime
+(LM Studio, Ollama, OpenAI, Anthropic, custom). So LM Studio can be the
+primary advisor with Claude CLI as the 2nd check and Codex CLI as the 3rd,
+or Codex primary / LM Studio 2nd / Claude 3rd — any mix. Checks run per
+button press, never automatically.
 
 The reviewer gets the advisor's EXACT briefing (stashed in the advice as
 `_prompt` at consult time) plus the counsel as displayed after the app's
-verification gates, and returns strict JSON. House style still applies:
-the reply is shape-enforced, capped, and every issue that claims to be
-about an advised entry is checked against the displayed counsel — ones
-that match nothing are ANNOTATED `unmatched` rather than dropped, because
-"the advisor failed to mention X" legitimately names things not advised.
+verification gates, and returns strict JSON. The THIRD check also sees the
+second's review (when one exists) and is asked to agree or disagree — an
+arbiter, not an echo. House style applies: the reply is shape-enforced,
+capped, and every issue that claims to be about an advised entry is checked
+against the displayed counsel — ones that match nothing are ANNOTATED
+`unmatched` rather than dropped, because "the advisor failed to mention X"
+legitimately names things not advised.
 
-CLI flag notes (verified against claude 2.1.220):
-- `--tools ""` disables all tools: this is a pure reasoning call and must
-  never wander the filesystem.
-- `--strict-mcp-config` with no --mcp-config = no MCP servers.
-- `--system-prompt` REPLACES the default agent system prompt.
-- NEVER add `--bare`: it restricts auth to ANTHROPIC_API_KEY and would
-  break the normal subscription (OAuth) login this feature exists to use.
-- cwd is the system temp dir, not the repo and not data/: print mode
-  auto-discovers CLAUDE.md up the tree, and this repo's would inject
-  thousands of tokens of irrelevant coding instructions into the review.
+CLI mechanics (flags, stdin, temp cwd, no --bare) live in backend/cli_llm.py.
 """
-import asyncio
 import json
 import logging
-import os
-import shutil
-import subprocess
-import tempfile
 from datetime import datetime
 from typing import Any, List, Optional
 
-from backend.config import settings
+from backend import cli_llm
+from backend.llm_runtime import get_llm, model_for
 
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are a second-opinion reviewer inside an EverQuest Legends (EQL) "
-    "companion app. A smaller LLM (the 'advisor') produced counsel for a "
+    "companion app. Another LLM (the 'advisor') produced counsel for a "
     "player; you double-check it with fresh eyes and deeper reasoning. You "
     "receive the advisor's full briefing — the exact data and rules it was "
     "given — and the counsel shown to the player. Judge ONLY against that "
@@ -85,7 +75,7 @@ Rules:
 
 # keys of the advice payload that are app-internal, not counsel — the
 # reviewer never sees them (the briefing is passed separately anyway)
-_PRIVATE_KEYS = ("_prompt", "doublecheck", "stale")
+_PRIVATE_KEYS = ("_prompt", "doublecheck", "doublechecks", "stale")
 
 _SEVERITIES = {"major", "minor"}
 _SECTIONS = {"loadout", "prebuffs", "replace", "aa_now", "aa_save",
@@ -96,57 +86,34 @@ def _public_advice(advice: dict) -> dict:
     return {k: v for k, v in advice.items() if k not in _PRIVATE_KEYS}
 
 
-def build_review_prompt(briefing: str, advice: dict) -> str:
+def build_review_prompt(briefing: str, advice: dict,
+                        prior: Optional[dict] = None) -> str:
     counsel = json.dumps(_public_advice(advice), indent=1, ensure_ascii=False)
-    return (
-        "=== THE ADVISOR'S FULL BRIEFING (the exact data and rules it saw) ===\n"
-        f"{briefing}\n\n"
+    parts = [
+        "=== THE ADVISOR'S FULL BRIEFING (the exact data and rules it saw) ===",
+        briefing,
+        "",
         "=== COUNSEL SHOWN TO THE PLAYER (after the app's machine-verification "
-        "gates — entries the gates dropped are already gone) ===\n"
-        f"{counsel}\n\n"
-        f"{REVIEW_TASK}"
-    )
-
-
-def _resolve_cli() -> Optional[str]:
-    """Absolute path to the claude executable, or None. `shutil.which`
-    covers PATH and adds .exe on Windows; an explicit path in the setting
-    is honored as-is."""
-    exe = shutil.which(settings.claude_cli)
-    if exe:
-        return exe
-    p = settings.claude_cli
-    return p if os.path.isfile(p) else None
-
-
-def _run_cli(exe: str, prompt: str) -> subprocess.CompletedProcess:
-    """One blocking `claude -p` run. The prompt travels via stdin — it is
-    tens of KB, far past Windows' command-line length limit."""
-    cmd = [
-        exe, "-p",
-        "--model", settings.doublecheck_model,
-        "--effort", settings.doublecheck_effort,
-        "--output-format", "json",
-        "--tools", "",
-        "--strict-mcp-config",
-        "--no-session-persistence",
-        "--system-prompt", SYSTEM_PROMPT,
+        "gates — entries the gates dropped are already gone) ===",
+        counsel,
+        "",
     ]
-    kw: dict = {}
-    if os.name == "nt":
-        # the packaged app is windowed (no console): without this flag a
-        # console window flashes up for the whole run
-        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return subprocess.run(
-        cmd, input=prompt, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-        timeout=settings.doublecheck_timeout_s,
-        cwd=tempfile.gettempdir(), **kw)
-
-
-def _extract_review(text: str) -> Optional[dict]:
-    from backend.agent.advisor import _extract_json
-    return _extract_json(text)
+    if prior:
+        keep = {k: prior.get(k) for k in
+                ("verdict", "summary", "issues", "endorsements")}
+        parts += [
+            "=== AN EARLIER INDEPENDENT CHECK "
+            f"(by {prior.get('model') or prior.get('provider') or 'another model'}) ===",
+            json.dumps(keep, indent=1, ensure_ascii=False),
+            "",
+            "Form your OWN view from the briefing FIRST, then compare: say in "
+            "your summary where you agree or disagree with this earlier check, "
+            "and do not repeat an issue of it you cannot independently ground "
+            "in the briefing.",
+            "",
+        ]
+    parts.append(REVIEW_TASK)
+    return "\n".join(parts)
 
 
 def _clean_issues(items: Any, advice_blob: str) -> List[dict]:
@@ -179,54 +146,47 @@ def _clean_issues(items: Any, advice_blob: str) -> List[dict]:
 
 
 def _error(msg: str) -> dict:
-    logger.warning("Double-check failed: %s", msg)
+    logger.warning("Check failed: %s", msg)
     return {"error": msg}
 
 
-async def run_doublecheck(briefing: str, advice: dict) -> dict:
-    """Review the displayed counsel with one CLI call. Returns the review
-    dict, or {"error": ...} — never raises, never fakes a review."""
-    exe = _resolve_cli()
-    if not exe:
-        return _error(
-            f"claude CLI not found ({settings.claude_cli!r}) — install "
-            "Claude Code or set CLAUDE_CLI in .env to its full path.")
-    prompt = build_review_prompt(briefing, advice)
+async def _ask(provider: str, prompt: str) -> tuple:
+    """(reply text, meta) from the given provider — CLI subprocess or the
+    runtime's chat model. Raises with a user-showable message."""
+    if provider in cli_llm.PROVIDERS:
+        model = model_for(provider)
+        return await cli_llm.arun(provider, prompt, system=SYSTEM_PROMPT,
+                                  model=model)
+    # API/local providers reuse the same seam the advisor consults through
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from backend.agent.advisor import _reply_text
+    llm = get_llm(provider)
+    response = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT),
+                                  HumanMessage(content=prompt)])
+    return _reply_text(response), {}
+
+
+async def run_doublecheck(briefing: str, advice: dict, provider: str,
+                          slot: str = "second",
+                          prior: Optional[dict] = None) -> dict:
+    """Review the displayed counsel with the given provider. Returns the
+    review dict, or {"error": ...} — never raises, never fakes a review."""
+    if provider in ("none", "", None):
+        return _error("This check slot is set to none — pick a model for it "
+                      "next to the check button.")
+    prompt = build_review_prompt(briefing, advice, prior)
     started = datetime.now()
     try:
-        proc = await asyncio.to_thread(_run_cli, exe, prompt)
-    except subprocess.TimeoutExpired:
-        return _error(f"claude CLI timed out after "
-                      f"{settings.doublecheck_timeout_s}s "
-                      f"({settings.doublecheck_model}, "
-                      f"effort {settings.doublecheck_effort}).")
-    except Exception as e:  # spawn failure — bad path, EPERM, ...
-        return _error(f"could not run the claude CLI: {e}")
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip()[-400:]
-        return _error(f"claude CLI exited {proc.returncode}: {tail or 'no output'}")
+        text, meta = await _ask(provider, prompt)
+    except Exception as e:
+        return _error(f"{cli_llm.LABELS.get(provider, provider)} check "
+                      f"failed: {str(e)[:400]}")
 
-    # --output-format json prints one envelope object; the answer is its
-    # "result" string. Fall back to treating stdout as the answer itself
-    # so a format change degrades instead of breaking.
-    raw = (proc.stdout or "").strip()
-    result_text, cost, duration_ms = raw, None, None
-    try:
-        envelope = json.loads(raw)
-        if isinstance(envelope, dict) and "result" in envelope:
-            if envelope.get("is_error"):
-                return _error(f"claude CLI reported an error: "
-                              f"{str(envelope.get('result'))[:400]}")
-            result_text = str(envelope.get("result") or "")
-            cost = envelope.get("total_cost_usd")
-            duration_ms = envelope.get("duration_ms")
-    except json.JSONDecodeError:
-        pass
-
-    data = _extract_review(result_text)
+    from backend.agent.advisor import _extract_json
+    data = _extract_json(text)
     if not data:
         return _error("the reply carried no JSON review "
-                      f"({len(result_text)} chars of text seen).")
+                      f"({len(text)} chars of text seen).")
 
     advice_blob = json.dumps(_public_advice(advice),
                              ensure_ascii=False).casefold()
@@ -238,7 +198,12 @@ async def run_doublecheck(briefing: str, advice: dict) -> dict:
         # a verdict with zero surviving issues is an empty accusation
         verdict = "sound"
     elapsed = (datetime.now() - started).total_seconds()
+    duration_ms = meta.get("duration_ms")
+    effort = (cli_llm.model_effort(provider)[1]
+              if provider in cli_llm.PROVIDERS else None)
     return {
+        "slot": slot,
+        "provider": provider,
         "verdict": verdict,
         "summary": (str(data.get("summary")).strip()
                     if data.get("summary") else None),
@@ -246,9 +211,9 @@ async def run_doublecheck(briefing: str, advice: dict) -> dict:
         "endorsements": [str(e).strip() for e in
                          (data.get("endorsements") or [])[:3]
                          if str(e).strip()],
-        "model": settings.doublecheck_model,
-        "effort": settings.doublecheck_effort,
+        "model": model_for(provider),
+        "effort": effort,
         "duration_s": round(duration_ms / 1000 if duration_ms else elapsed),
-        "cost_usd": cost,
+        "cost_usd": meta.get("cost_usd"),
         "generated": datetime.now().isoformat(timespec="seconds"),
     }

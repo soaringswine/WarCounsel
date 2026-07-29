@@ -1785,6 +1785,25 @@ button.app-version:hover { color: var(--gold-bright); }
 
 .adv-dc-btn { white-space: nowrap; }
 
+.adv-dc-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.adv-dc-slot select {
+  max-width: 200px;
+  font-size: 11.5px;
+}
+
+.adv-dc-review {
+  border-top: 1px solid var(--hairline-dim);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
 .adv-dc-verdict {
   font-family: var(--font-display), serif;
   font-size: 10.5px;

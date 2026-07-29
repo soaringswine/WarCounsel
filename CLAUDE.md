@@ -435,9 +435,11 @@ throttled `state` pushes. REST highlights (see main.py for all):
   `?cached=1` returns the cache instantly or `{"cached": false}` WITHOUT
   running the LLM (the tab restores results on load; consults are
   button-press only, never automatic)
-- `POST /api/advisor/doublecheck` — one-off `claude -p` second opinion
-  on the current counsel (default claude-opus-5 at high effort), reviewed
-  against the exact briefing the advisor saw; rides the advice cache
+- `POST /api/advisor/doublecheck` `{slot: second|third}` — run one check
+  slot on the current counsel: the slot's provider reviews it against the
+  exact briefing the advisor saw; the third check also sees the second's
+  review. Rides the advice cache. `POST /api/llm/checks` assigns a
+  provider (any, or "none") to each slot
 - `GET/POST /api/llm` — runtime model switch; clears both consult caches
 - `GET /api/hunting` — deterministic leveling-zone candidates (Gantt chart)
 - `GET /api/spellbook|aas|exports` · `POST /api/exports/refresh|aas/rescan`
@@ -615,22 +617,20 @@ display**; failing entries are dropped and logged, never shown. The gates
   ONLY, never automatic.
 - Tiered loadout: must_have / should_have fill the spell slots exactly;
   nice_to_have offers swaps. Spell levels annotated from the spellbook.
-- **Double-check** (`backend/agent/doublecheck.py`): `generate_advice`
+- **Check slots** (`backend/agent/doublecheck.py`): `generate_advice`
   stashes the briefing actually sent as `_prompt` in the advice payload
-  (builtin path renders it wiki-less — that IS what it reasoned from), and
-  `POST /api/advisor/doublecheck` replays it plus the displayed counsel
-  through ONE Claude Code CLI run — subscription auth, deliberately NOT an
-  llm_runtime provider (the point is a stronger model reviewing whatever
-  the selected provider produced). Flags matter: `--tools ""` (pure
-  reasoning, never wanders the filesystem), `--strict-mcp-config`, cwd =
-  temp dir (print mode auto-discovers CLAUDE.md up the tree — THIS file
-  would inject itself into the review), and never `--bare` (it restricts
-  auth to ANTHROPIC_API_KEY, breaking the subscription OAuth this exists
-  to use). The reply is shape-enforced; issues whose `item` matches
+  (builtin path renders it wiki-less — that IS what it reasoned from).
+  Two slots ("second"/"third", persisted in llm_config.json via
+  `llm_runtime.checks()`) each hold ANY provider — so LM Studio can be
+  primary with Claude CLI 2nd and Codex CLI 3rd, or any other mix.
+  `POST /api/advisor/doublecheck {slot}` replays the briefing plus the
+  displayed counsel through the slot's provider; the THIRD check also
+  sees the second's review and must agree or disagree from the briefing,
+  not echo it. The reply is shape-enforced; issues whose `item` matches
   nothing displayed are ANNOTATED `unmatched` rather than dropped, because
   "the advisor failed to mention X" legitimately names un-advised things.
-  The review rides `_advice_cache["doublecheck"]`, so it restores with the
-  counsel and dies with it on the next consult; failures return 502 and
+  Reviews ride `_advice_cache["doublechecks"]`, so they restore with the
+  counsel and die with it on the next consult; failures return 502 and
   are never cached.
 - **AA counsel is gated**: `/alternateadv list` never prints ranks (it just
   lists each ability once), so the roster's rank counter is unreliable. The
@@ -768,7 +768,22 @@ whenever the Inventory parse changes.
 ## LLM runtime (backend/llm_runtime.py)
 
 - Providers: `none` (deterministic) | `lmstudio` | `openai` | `custom` (any
-  OpenAI-compatible base URL) | `anthropic` | `local` (Ollama).
+  OpenAI-compatible base URL) | `anthropic` | `local` (Ollama) |
+  `claude_cli` | `codex_cli` (coding-agent CLIs as one-off subprocesses).
+  - **The CLI providers** (`backend/cli_llm.py`, wrapped by `_CliChat` on
+    the get_llm() seam) authenticate with the CLI's own subscription login
+    — no key in the app. Invariants that MUST hold: prompt via STDIN
+    (briefings blow past Windows' command-line limit), cwd = temp dir
+    (both CLIs auto-discover CLAUDE.md/AGENTS.md up the tree and this
+    repo's would inject itself into a game consult), CREATE_NO_WINDOW
+    (the packaged app is windowed — a console flashes otherwise). Claude:
+    `--tools ""`, `--strict-mcp-config`, `--no-session-persistence`,
+    never `--bare` (restricts auth to ANTHROPIC_API_KEY, breaking the
+    subscription OAuth these exist to use). Codex: `-s read-only
+    --skip-git-repo-check --ephemeral`, answer read from `-o <file>`
+    (stdout is the whole transcript), no system-prompt flag so `system`
+    is prepended. `probe()` runs `--version` — free for both. Empty
+    codex model = its own default; displayed as "default".
   - Ollama gets a REAL client, not the `custom` OpenAI shim, because it
     speaks its own protocol. `OLLAMA_BASE_URL`/`OLLAMA_MODEL` exist so it
     can live on another machine — a common setup.
@@ -782,10 +797,12 @@ whenever the Inventory parse changes.
   - **Grok needs no provider of its own** — xAI is OpenAI-compatible at
     `https://api.x.ai/v1`, so it is a `custom` endpoint. The menu names it
     so nobody asks for a Grok provider that would just duplicate `custom`.
-  - **Adding a provider means FOUR places**, and missing any of them makes
-    it invisible: `get_llm()`, the `POST /api/llm` allow-list, the
-    `GET /api/llm` options list, and SettingsModal's `PROVIDERS` (plus
-    `keyFieldFor` if it needs a key). Both Ollama AND Anthropic were
+  - **Adding a provider means SIX places**, and missing any of them makes
+    it invisible: `get_llm()`/`_build()`, the `POST /api/llm` allow-list
+    (`LLM_PROVIDERS` in main.py), the `GET /api/llm` options list,
+    SettingsModal's `PROVIDERS` (plus `keyFieldFor` if it needs a key),
+    `setup_wizard.py`'s menu, and `model_for()`/`set_active()`'s
+    per-provider model keys. Both Ollama AND Anthropic were
     implemented and shipped yet unreachable for exactly this reason —
     Anthropic was even bundled into the .exe, so we paid to package a
     client nobody could select.
