@@ -1302,6 +1302,30 @@ async def get_advisor(refresh: bool = False, cached: bool = False):
     return advice
 
 
+@app.post("/api/advisor/doublecheck")
+async def advisor_doublecheck():
+    """Second opinion on the CURRENT counsel: one `claude -p` run (Opus,
+    high effort by default) reviewing the advice against the exact briefing
+    the advisor saw. Button-press only, like the consults. The review rides
+    _advice_cache["doublecheck"], so it restores with the counsel and dies
+    with it on the next consult; failures return 502 and are never cached."""
+    global _advice_cache
+    if _advice_cache is None:
+        raise HTTPException(409, "No counsel to double-check — press "
+                                 "Consult first.")
+    if not _advice_cache.get("_prompt"):
+        # counsel cached by a pre-doublecheck version: no briefing stored
+        raise HTTPException(409, "This counsel predates double-checking — "
+                                 "press Consult once to refresh it first.")
+    from backend.agent.doublecheck import run_doublecheck
+    review = await run_doublecheck(_advice_cache["_prompt"], _advice_cache)
+    if review.get("error"):
+        raise HTTPException(502, review["error"])
+    _advice_cache = {**_advice_cache, "doublecheck": review}
+    _save_advice_cache()
+    return review
+
+
 @app.get("/api/gear")
 async def get_gear(refresh: bool = False, cached: bool = False):
     """Equipment counsel: best owned item per slot + farming targets.

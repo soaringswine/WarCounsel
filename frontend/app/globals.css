@@ -1762,6 +1762,98 @@ button.app-version:hover { color: var(--gold-bright); }
   margin-bottom: 8px;
 }
 
+/* Double-check — second opinion on the counsel from a one-off Claude Code
+   CLI run. Verdict/severity always carry their word (color never alone). */
+.adv-dc {
+  border: 1px solid var(--hairline-dim);
+  padding: 8px 10px;
+  margin-bottom: 14px;
+}
+
+.adv-dc-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.adv-dc-title {
+  flex: 1;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.adv-dc-btn { white-space: nowrap; }
+
+.adv-dc-verdict {
+  font-family: var(--font-display), serif;
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border: 1px solid var(--hairline);
+  color: var(--gold);
+}
+
+.adv-dc-verdict[data-v="sound"] {
+  color: var(--heal);
+  border-color: rgba(31, 179, 140, 0.5);
+  background: rgba(31, 179, 140, 0.08);
+}
+
+.adv-dc-verdict[data-v="minor_issues"] {
+  color: var(--gold-bright);
+  background: rgba(200, 170, 110, 0.08);
+}
+
+.adv-dc-verdict[data-v="major_issues"] {
+  color: var(--dmg-in);
+  border-color: rgba(212, 87, 74, 0.5);
+  background: rgba(212, 87, 74, 0.08);
+}
+
+.adv-dc-summary {
+  font-size: 12.5px;
+  margin-top: 8px;
+}
+
+.adv-dc-issues { margin-top: 8px; }
+.adv-dc-issues li[data-dim] { opacity: 0.55; }
+
+.adv-dc-sev {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0 5px;
+  border: 1px solid var(--hairline-dim);
+  color: var(--gold);
+}
+
+.adv-dc-sev[data-sev="major"] {
+  color: var(--dmg-in);
+  border-color: rgba(212, 87, 74, 0.5);
+}
+
+.adv-dc-fix {
+  color: var(--heal);
+  font-size: 12px;
+}
+
+.adv-dc-endorse {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+.adv-dc-error {
+  font-size: 12px;
+  color: var(--dmg-in);
+  border-left: 2px solid var(--dmg-in);
+  background: rgba(212, 87, 74, 0.07);
+  padding: 6px 10px;
+  margin-top: 8px;
+}
+
 .update-avail {
   margin-left: 10px;
   background: none;

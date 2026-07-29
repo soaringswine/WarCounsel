@@ -145,6 +145,15 @@ class Settings(BaseSettings):
     custom_api_key: str = ""                  # (Groq, OpenRouter, Gemini, ...)
     custom_model: str = ""
 
+    # Advisor double-check: one-off `claude -p` runs against the Claude Code
+    # CLI (subscription auth — no API key involved). Independent of the
+    # provider selector above on purpose: it is a second opinion on the
+    # counsel that selector produced.
+    claude_cli: str = "claude"                # path to claude / claude.exe
+    doublecheck_model: str = "claude-opus-5"
+    doublecheck_effort: str = "high"          # low|medium|high|xhigh|max
+    doublecheck_timeout_s: int = 600          # Opus at high effort can think a while
+
     # Database
     database_url: str = _DEFAULT_DB_URL
 
