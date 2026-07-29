@@ -422,9 +422,36 @@ export interface GearAdvice {
   unknown: string[];
 }
 
+export interface DoubleCheckIssue {
+  section: string;
+  item: string;
+  problem: string;
+  fix: string | null;
+  severity: "major" | "minor";
+  /** The issue names an advised entry that is not in the displayed counsel
+   *  (deterministic cross-check) — rendered dimmed, trust accordingly. */
+  unmatched?: boolean;
+}
+
+/** Second opinion on the counsel from a one-off Claude Code CLI run
+ *  (stronger model, high reasoning effort). Rides the advice cache: it
+ *  restores with the counsel and dies with it on the next consult. */
+export interface DoubleCheck {
+  verdict: "sound" | "minor_issues" | "major_issues";
+  summary: string | null;
+  issues: DoubleCheckIssue[];
+  endorsements: string[];
+  model: string;
+  effort: string;
+  duration_s: number;
+  cost_usd: number | null;
+  generated: string;
+}
+
 export interface Advice {
   stale?: boolean;
   purchase?: PurchaseItem[];
+  doublecheck?: DoubleCheck;
   source: "llm" | "builtin";
   grounding: "wiki" | "memory";
   generated: string;

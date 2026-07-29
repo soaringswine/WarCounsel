@@ -1008,6 +1008,11 @@ async def generate_advice(ctx: dict) -> dict:
         if llm_active()["provider"] == "none":
             body = await _builtin_counsel(ctx)
             base["grounding"] = body.pop("grounding", "memory")
+            # Stash the briefing for a later double-check. This path is
+            # deliberately offline, so the briefing renders the character
+            # context without wiki data — which is exactly what the
+            # deterministic advisor reasoned from.
+            base["_prompt"] = _build_prompt(ctx, "")
             return {**base, **body}
         wiki = await build_wiki_context(
             classes, ctx.get("level"),
@@ -1027,6 +1032,9 @@ async def generate_advice(ctx: dict) -> dict:
             wiki = wiki[:5000]
             prompt = _build_prompt(ctx, wiki)
             budget = await asyncio.to_thread(_lmstudio_budget, len(prompt))
+        # the briefing actually sent, kept (and cached) so a double-check
+        # can review the counsel against the same data the advisor saw
+        base["_prompt"] = prompt
         llm = get_llm()
         bound = llm
         if budget:
@@ -1041,6 +1049,7 @@ async def generate_advice(ctx: dict) -> dict:
             logger.warning("Advisor first attempt failed (%.80s); retrying "
                            "smaller", str(first_err))
             prompt = _build_prompt(ctx, wiki[:4000])
+            base["_prompt"] = prompt
             if budget:
                 try:
                     bound = llm.bind(max_tokens=max(1200, budget // 2))

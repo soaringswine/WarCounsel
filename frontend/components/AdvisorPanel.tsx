@@ -3,7 +3,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiSend } from "@/lib/api";
 import { ItemHover } from "./ItemHover";
-import type { Advice, ExportsStatus, GearAdvice, HuntingData, LlmInfo, OwnedAAsInfo, Snapshot, SpellbookInfo } from "@/lib/types";
+import type { Advice, DoubleCheck, ExportsStatus, GearAdvice, HuntingData, LlmInfo, OwnedAAsInfo, Snapshot, SpellbookInfo } from "@/lib/types";
 
 const CLASSES = [
   "Bard", "Beastlord", "Berserker", "Cleric", "Druid", "Enchanter",
@@ -142,6 +142,8 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [advice, setAdvice] = useState<Advice | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dcLoading, setDcLoading] = useState(false);
+  const [dcError, setDcError] = useState<string | null>(null);
   const [aaDraft, setAaDraft] = useState("");
   const [slotsDraft, setSlotsDraft] = useState("");
   const [petSlotsDraft, setPetSlotsDraft] = useState("");
@@ -309,6 +311,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const consult = useCallback(async (refresh: boolean) => {
     setLoading(true);
     setError(null);
+    setDcError(null); // fresh counsel — an old double-check error is moot
     setScanResult(null); // sticky spell-set notes live until the next consult
     try {
       setAdvice(await apiGet<Advice>(`/api/advisor${refresh ? "?refresh=1" : ""}`));
@@ -318,6 +321,25 @@ export const AdvisorPanel = memo(function AdvisorPanel({
       setLoading(false);
     }
   }, []);
+
+  // One-off `claude -p` run (stronger model, high effort) reviewing the
+  // displayed counsel against the advisor's exact briefing. Button-press
+  // only, like the consults; the result rides the advice cache.
+  const doubleCheck = async () => {
+    setDcLoading(true);
+    setDcError(null);
+    try {
+      const r = await apiSend<DoubleCheck>("/api/advisor/doublecheck", {});
+      setAdvice((a) => (a ? { ...a, doublecheck: r } : a));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // FastAPI wraps the reason as {"detail": "..."} — unwrap for display
+      const m = msg.match(/"detail"\s*:\s*"([^"]+)"/);
+      setDcError(m ? m[1] : msg);
+    } finally {
+      setDcLoading(false);
+    }
+  };
 
   useEffect(() => {
     // restore the last counsel if the backend still has it — never trigger
@@ -546,6 +568,79 @@ export const AdvisorPanel = memo(function AdvisorPanel({
               </div>
             )}
             {advice.note && <div className="adv-note">{advice.note}</div>}
+
+            <div className="adv-dc">
+              <div className="adv-dc-bar">
+                {advice.doublecheck && (
+                  <span className="adv-dc-verdict" data-v={advice.doublecheck.verdict}>
+                    {advice.doublecheck.verdict.replace("_", " ")}
+                  </span>
+                )}
+                <span className="adv-dc-title">
+                  {advice.doublecheck
+                    ? `second opinion — ${advice.doublecheck.model} · ${advice.doublecheck.effort} effort · ${advice.doublecheck.duration_s}s` +
+                      (advice.doublecheck.cost_usd ? ` · $${advice.doublecheck.cost_usd.toFixed(2)}` : "")
+                    : "Second opinion: have a stronger model re-derive this counsel from the same data."}
+                </span>
+                <button
+                  type="button"
+                  className="adv-rescan adv-gear-btn adv-dc-btn"
+                  onClick={doubleCheck}
+                  disabled={dcLoading || loading}
+                  title="One-off `claude -p` run: Opus at high reasoning effort reviews these picks against the exact briefing the advisor saw. Needs Claude Code installed and logged in; can take a few minutes."
+                >
+                  {dcLoading
+                    ? "double-checking…"
+                    : advice.doublecheck ? "double-check again" : "double-check (Opus)"}
+                </button>
+              </div>
+              {dcLoading && (
+                <div className="adv-gear-loading" role="status" aria-live="polite">
+                  <span className="adv-gear-spin" aria-hidden />
+                  Double-checking — Opus is re-deriving the counsel from the
+                  briefing… (high effort; this can take a few minutes)
+                </div>
+              )}
+              {dcError && <p className="adv-dc-error" role="alert">{dcError}</p>}
+              {advice.doublecheck && !dcLoading && (
+                <>
+                  {advice.doublecheck.summary && (
+                    <p className="adv-dc-summary">{advice.doublecheck.summary}</p>
+                  )}
+                  {advice.doublecheck.issues.length > 0 && (
+                    <ul className="adv-list adv-dc-issues">
+                      {advice.doublecheck.issues.map((iss, i) => (
+                        <li key={i} data-dim={iss.unmatched || undefined}>
+                          <span className="adv-dc-sev" data-sev={iss.severity}>
+                            {iss.severity}
+                          </span>{" "}
+                          <span className="adv-cls">[{iss.section}]</span>{" "}
+                          <strong>{iss.item}</strong>
+                          {iss.unmatched && (
+                            <span className="adv-cls">
+                              {" "}(names something not in the counsel above)
+                            </span>
+                          )}
+                          <br />
+                          {iss.problem}
+                          {iss.fix && (
+                            <>
+                              <br />
+                              <span className="adv-dc-fix">fix: {iss.fix}</span>
+                            </>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {advice.doublecheck.endorsements.length > 0 && (
+                    <p className="adv-dc-endorse">
+                      Confirmed right: {advice.doublecheck.endorsements.join(" · ")}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
 
             {advice.loadout.length + advice.nice_to_have.length > 0 && (
               <div className="adv-section">

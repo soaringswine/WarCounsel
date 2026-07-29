@@ -435,6 +435,9 @@ throttled `state` pushes. REST highlights (see main.py for all):
   `?cached=1` returns the cache instantly or `{"cached": false}` WITHOUT
   running the LLM (the tab restores results on load; consults are
   button-press only, never automatic)
+- `POST /api/advisor/doublecheck` — one-off `claude -p` second opinion
+  on the current counsel (default claude-opus-5 at high effort), reviewed
+  against the exact briefing the advisor saw; rides the advice cache
 - `GET/POST /api/llm` — runtime model switch; clears both consult caches
 - `GET /api/hunting` — deterministic leveling-zone candidates (Gantt chart)
 - `GET /api/spellbook|aas|exports` · `POST /api/exports/refresh|aas/rescan`
@@ -612,6 +615,23 @@ display**; failing entries are dropped and logged, never shown. The gates
   ONLY, never automatic.
 - Tiered loadout: must_have / should_have fill the spell slots exactly;
   nice_to_have offers swaps. Spell levels annotated from the spellbook.
+- **Double-check** (`backend/agent/doublecheck.py`): `generate_advice`
+  stashes the briefing actually sent as `_prompt` in the advice payload
+  (builtin path renders it wiki-less — that IS what it reasoned from), and
+  `POST /api/advisor/doublecheck` replays it plus the displayed counsel
+  through ONE Claude Code CLI run — subscription auth, deliberately NOT an
+  llm_runtime provider (the point is a stronger model reviewing whatever
+  the selected provider produced). Flags matter: `--tools ""` (pure
+  reasoning, never wanders the filesystem), `--strict-mcp-config`, cwd =
+  temp dir (print mode auto-discovers CLAUDE.md up the tree — THIS file
+  would inject itself into the review), and never `--bare` (it restricts
+  auth to ANTHROPIC_API_KEY, breaking the subscription OAuth this exists
+  to use). The reply is shape-enforced; issues whose `item` matches
+  nothing displayed are ANNOTATED `unmatched` rather than dropped, because
+  "the advisor failed to mention X" legitimately names un-advised things.
+  The review rides `_advice_cache["doublecheck"]`, so it restores with the
+  counsel and dies with it on the next consult; failures return 502 and
+  are never cached.
 - **AA counsel is gated**: `/alternateadv list` never prints ranks (it just
   lists each ability once), so the roster's rank counter is unreliable. The
   OWNED rank is RECOVERED by matching the log's current-effect number
