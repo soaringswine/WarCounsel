@@ -65,7 +65,8 @@ Reply with ONLY a JSON object (no markdown fences, no prose) shaped exactly like
   "aa_save": [{"name": "...", "cost": 12, "reason": "..."}],
   "horizon": [{"level": 33, "cls": "...", "name": "...", "reason": "..."}],
   "locations": [{"zone": "...", "why": "...", "notable": "..."}],
-  "class_notes": [{"topic": "...", "advice": "..."}]
+  "class_notes": [{"topic": "...", "advice": "..."}],
+  "sa_songs": ["song name", "..."]
 }
 
 Rules:
@@ -83,6 +84,7 @@ Rules:
 - horizon: the significant spells/abilities arriving within the NEXT 2 LEVELS for any of the three classes (exact level from the tables), plus any AA worth buying in advance for them.
 - locations: 2-4 hunting spots for the level and focus. When a "Hunting grounds" list is present in the character data, choose ONLY zones from that list, using its exact names — never a city, never a zone outside the list (picks outside it are machine-discarded). Prefer spots whose band centers on the level over ones they are outgrowing; where you know a notable drop that pairs with this trio, name it in "notable" (else use "").
 - class_notes: one entry per class with practical guidance — for melee: which weapon skill to run right now (e.g. fists vs 1H Blunt for a Monk) and exaltations/disciplines if known. Mark uncertainty plainly when the data above does not cover it; never invent numbers.
+- sa_songs: ONLY when the trio includes a Bard (else []): the 1-4 songs FROM YOUR LOADOUT PICKS that Symphonic Aura should auto-pulse DURING COMBAT, most important first. Mechanics: SA pulses one eligible song per owned rank — eligible means zero mana, no cooldown, non-targeted — scanning from the FINAL spell gem BACKWARDS, so the written spell set will place these at the BOTTOM, most important in the very last gem, and the player cannot twist them manually while SA holds them. Pick combat value (melee buffs, haste, regen); never a travel song — Selo's in an SA slot wastes a pulse mid-fight.
 """
 
 WIKI_HEADER_PRESENT = ("AUTHORITATIVE EQL WIKI DATA - prefer these exact names, "
@@ -339,9 +341,60 @@ def _gem_category(name: str) -> str:
     return "utility"
 
 
-def stack_gem_order(names: List[str]) -> List[str]:
+def _sa_songs(classes: List[str], picks: List[dict],
+              proposed: Optional[List] = None) -> List[str]:
+    """The songs Symphonic Aura should pulse, most important FIRST — the
+    model proposes, this gates: in the loadout, a Bard spell, and ZERO mana
+    (the one eligibility rule the eqlbuilds AA text states that our data
+    can verify; target-type wording is ambiguous, and an ineligible song
+    only makes SA scan one gem further up). Deterministic fallback when
+    the model is silent: zero-mana Bard songs in pick-priority order."""
+    if not any(c.strip().lower() == "bard" for c in classes or []):
+        return []
+    from backend import builds_data
+    bard = {s["name"].lower()
+            for s in (builds_data.class_spells("Bard") or [])}
+    picked = [str(x.get("name")) for x in picks if x.get("name")]
+    picked_low = {n.lower() for n in picked}
+
+    def eligible(name: str) -> bool:
+        if bard and name.lower() not in bard:
+            return False
+        e = builds_data.spell_entry(name)
+        if e and (e.get("manaCost") or 0) > 0:
+            return False  # SA only pulses zero-mana songs
+        return True
+
+    out: List[str] = []
+    for nm in proposed or []:
+        n = str(nm).strip()
+        if not n or n.lower() in {x.lower() for x in out}:
+            continue
+        if n.lower() not in picked_low:
+            logger.info("Dropped sa_songs pick not in the loadout: %s", n)
+            continue
+        if not eligible(n):
+            logger.info("Dropped sa_songs pick — not a zero-mana Bard "
+                        "song: %s", n)
+            continue
+        out.append(next(p for p in picked if p.lower() == n.lower()))
+        if len(out) >= 4:
+            break
+    if not out:
+        out = [n for n in picked if eligible(n)][:3]
+    return out
+
+
+def stack_gem_order(names: List[str],
+                    sa_songs: Optional[List[str]] = None) -> List[str]:
     """Order picks for the in-game set: DD, DoT, AoE from gem 1; healing
-    starting gem 8 where possible; then utility, summons, summon utility."""
+    starting gem 8 where possible; then utility, summons, summon utility.
+
+    `sa_songs` (most important first) sink to the ABSOLUTE BOTTOM, most
+    important in the final gem: Symphonic Aura pulses eligible songs
+    scanning from the final spell gem BACKWARDS, one per owned rank
+    (eqlbuilds AA text) — category order put a travel song below a melee
+    song once, and SA spent its combat pulses on run speed."""
     cats = {n: _gem_category(n) for n in names}
 
     def bucket(*cs):
@@ -354,7 +407,12 @@ def stack_gem_order(names: List[str]) -> List[str]:
     spill = offense[7:]
     while len(slots) < 7 and heals and tail:
         slots.append(tail.pop(0))  # keep heals at gem 8 when there is filler
-    return (slots + heals + spill + tail)[:14]
+    order = (slots + heals + spill + tail)[:14]
+    sa = [n for n in (sa_songs or []) if n in order]
+    if sa:
+        rest = [n for n in order if n not in sa]
+        order = rest + list(reversed(sa))
+    return order
 
 
 async def _extra_alternatives(ctx: dict, exclude: set, want: int) -> List[dict]:
@@ -1080,6 +1138,9 @@ async def generate_advice(ctx: dict) -> dict:
         if llm_active()["provider"] == "none":
             body = await _builtin_counsel(ctx)
             base["grounding"] = body.pop("grounding", "memory")
+            body["sa_songs"] = _sa_songs(
+                classes, (body.get("must_have") or [])
+                + (body.get("should_have") or []))
             # Stash the briefing for a later double-check. This path is
             # deliberately offline, so the briefing renders the character
             # context without wiki data — which is exactly what the
@@ -1267,6 +1328,8 @@ async def generate_advice(ctx: dict) -> dict:
             **base, "source": "llm",
             "note": data.get("note"),
             "loadout": loadout,
+            "sa_songs": _sa_songs(classes, must_have + should_have,
+                                  data.get("sa_songs")),
             "must_have": must_have,
             "should_have": should_have,
             "nice_to_have": nice_to_have,
@@ -1291,6 +1354,9 @@ async def generate_advice(ctx: dict) -> dict:
         try:
             body = await _builtin_counsel(ctx)
             base["grounding"] = body.pop("grounding", "memory")
+            body["sa_songs"] = _sa_songs(
+                classes, (body.get("must_have") or [])
+                + (body.get("should_have") or []))
             body["note"] = (f"LLM unavailable ({str(e)[:60]}) — showing "
                             "deterministic counsel instead. " + BUILTIN_NOTE)
             return {**base, **body}

@@ -1047,8 +1047,18 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                   </button>
                   <span className="adv-pick-count">
                     {Object.values(pickSel).filter(Boolean).length}/14 picked · gems auto-ordered: DD, DoT, AoE, heals@8, utility, pets
+                    {(advice.sa_songs?.length ?? 0) > 0 ? " · SA songs last" : ""}
                   </span>
                 </h3>
+                {(advice.sa_songs?.length ?? 0) > 0 && (
+                  <p className="adv-purchase-note">
+                    Symphonic Aura pulses eligible songs from the LAST gem
+                    upward, one per owned rank — the written set sinks{" "}
+                    {advice.sa_songs!.join(", ")} to the final gems
+                    ({advice.sa_songs![0]} bottom-most), so combat songs get
+                    the pulses instead of whatever landed there by category.
+                  </p>
+                )}
                 {([
                   ["Must have", advice.must_have, 0],
                   ["Should have", advice.should_have, advice.must_have.length],

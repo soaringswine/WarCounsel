@@ -888,12 +888,14 @@ async def generate_spellset(body: dict | None = None):
         if not picks:
             raise HTTPException(400, "no pre-buffs found (spellbook export missing?)")
     elif chosen:
-        picks = [{"name": n} for n in stack_gem_order([str(x) for x in chosen])]
+        sa = [str(s) for s in (_advice_cache.get("sa_songs") or [])]
+        picks = [{"name": n} for n in stack_gem_order([str(x) for x in chosen], sa)]
     else:
         names = [p.get("name") for p in
                  ((_advice_cache.get("must_have") or [])
                   + (_advice_cache.get("should_have") or []))]
-        picks = [{"name": n} for n in stack_gem_order([n for n in names if n])]
+        sa = [str(s) for s in (_advice_cache.get("sa_songs") or [])]
+        picks = [{"name": n} for n in stack_gem_order([n for n in names if n], sa)]
         if not picks:
             raise HTTPException(400, "the cached counsel has no loadout picks")
     path = find_loadout_ini(tracker.name, tracker.server)

@@ -468,6 +468,10 @@ export interface Advice {
   /** which provider/model was CONFIGURED when this counsel was produced —
    *  `source` says whether the LLM path actually ran (vs builtin fallback) */
   llm?: { provider: string; model: string };
+  /** Bard trios only: songs Symphonic Aura should auto-pulse, most
+   *  important first. The written spell set sinks these to the FINAL
+   *  gems (SA scans from the last gem backwards, one song per rank). */
+  sa_songs?: string[];
   source: "llm" | "builtin";
   grounding: "wiki" | "memory";
   generated: string;

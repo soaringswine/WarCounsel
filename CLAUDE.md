@@ -456,7 +456,14 @@ throttled `state` pushes. REST highlights (see main.py for all):
   saved spell sets / write the counsel as one (source=loadout|prebuffs,
   optional names[] from the UI checkboxes; gems auto-stacked DD, DoT, AoE,
   heals from gem 8, utility, pets; loadout set "companion", buff set
-  "prebuffs"; one-time .companion-backup beside the LO*.ini)
+  "prebuffs"; one-time .companion-backup beside the LO*.ini). For Bard
+  trios the advice carries `sa_songs` (model-proposed, gated: in the
+  loadout + Bard spell + ZERO mana; deterministic fallback in pick
+  order) and `stack_gem_order` sinks them to the FINAL gems, most
+  important last — Symphonic Aura pulses eligible songs scanning from
+  the last gem BACKWARDS, one per owned rank (eqlbuilds AA text), so
+  category order once fed SA a travel song instead of the melee songs
+  the counsel itself was relying on (live report)
 - `GET /api/update-check` (badge click + 6-hourly poll; API with plain
   tags-page fallback) · `POST /api/update/run` (spawns the updater in its
   own console window)
