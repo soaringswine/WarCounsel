@@ -45,7 +45,7 @@ ADVISOR_PROMPT = """You are the advisor inside an EverQuest Legends (EQL) compan
 - Reanimation / Reconstitution / Reparation are RESURRECTION spells: they return a DEAD group member to their corpse with experience. They heal nothing and provide zero sustain — never describe them as healing or self-sustain, and never slot them for a solo focus (you cannot cast while dead).
 - Spell slots are scarce: only __SLOTS_NOTE__ spells can be memorized at once.
 - AAs are available from level 1 (General / Archetype / Class / Special tabs) and persist across class swaps: a rank bought once is owned in every combo that qualifies, so General and Archetype ranks are better value than a Class rank for a trio that swaps classes.
-- Never recommend spending points on an AA the character does not BUY: Special-tab AAs (e.g. Banestrike) and free ranks come from achievements, and AUTOGRANTED class AAs arrive on their own at level (the launch-day Unbound line — Alacrity/Life/Ferocity/Versatility/Drain/Lethality — is autogranted). Recommending any of these wastes the player's points.
+- Never recommend spending points on an AA the character does not BUY: Special-tab AAs (e.g. Banestrike) and free ranks come from achievements, and AUTOGRANTED class AAs arrive on their own at level (the launch-day Unbound line — Alacrity/Life/Ferocity/Versatility/Drain/Lethality — is autogranted). Recommending any of these wastes the player's points. TOGGLE AAs (roster rows named like "Symphonic Aura: Enabled") are never purchase recommendations either — buying a rank flips the toggle instead of upgrading it.
 
 __WIKI_HEADER__
 __WIKI__
@@ -114,6 +114,34 @@ def _build_prompt(ctx: dict, wiki: str) -> str:
             f"{n} x{v['ranks']}" + (f" (next rank {v['cost']}pt)" if v.get("cost") else "")
             for n, v in sorted(aas.items()))
         lines.append(f"- Owned AAs (from /alternateadv list, {len(aas)} distinct): {aal}")
+        # Toggle AAs: the game names the roster row by STATE ("Symphonic
+        # Aura: Enabled"), and each purchase is a toggle TRANSACTION —
+        # verified against eqlwiki (costs 3/0 alternating, "Enabling and
+        # Disabling the ability each time you buy it") and the game's own
+        # roster text ("Expend the current rank to disable" / "Purchase
+        # the 0 cost rank to enable"). Recommending "the next rank" of an
+        # enabled toggle would tell the player to turn it OFF.
+        toggles = {n: v for n, v in aas.items()
+                   if re.search(r":\s*(Enabled|Disabled)\s*$", n, re.I)}
+        if toggles:
+            rows = "; ".join(
+                f'"{n}" — {(v.get("desc") or "no description").strip()}'
+                for n, v in sorted(toggles.items()))
+            both = len({re.sub(r":\s*(Enabled|Disabled)\s*$", "", n,
+                               flags=re.I).strip().lower()
+                        for n in toggles}) < len(toggles)
+            lines.append(
+                "- TOGGLE AAs in the sync (VERBATIM game rows): " + rows
+                + ". Each purchase is a toggle transaction — disabling "
+                "expends the current rank, re-enabling is the 0-cost rank; "
+                "for Symphonic Aura each PAID tier (~3 AA) adds one more "
+                "auto-pulsed song, up to 5. NEVER put a toggle AA in "
+                "aa_now/aa_save (such picks are machine-dropped): a "
+                "purchase while enabled DISABLES it. Discuss its state in "
+                "class_notes instead."
+                + (" BOTH states appear in the sync, so the CURRENT state "
+                   "is ambiguous — tell the player to check the AA window "
+                   "and re-run /alternateadv list." if both else ""))
     inv = ctx.get("inventory_worn")
     if inv:
         lines.append("- Equipped gear (from /outputfile inventory): "
@@ -1075,15 +1103,28 @@ def _gate_aas(items: List[dict], owned: dict, meta: dict) -> List[dict]:
     """Drop AA recs the character can't act on. Owned rank is RECOVERED from
     the eqlbuilds ladder (the log's rank counter is unreliable — it just
     counts list-bursts), so maxed AAs (Mnemonic Retention 6/6) and
-    already-owned ranks are dropped, and ranks beyond max are dropped."""
+    already-owned ranks are dropped, and ranks beyond max are dropped.
+
+    TOGGLE AAs (roster rows named "<base>: Enabled/Disabled" — Symphonic
+    Aura) are dropped outright: each purchase is a toggle transaction
+    (disabling expends the current rank, re-enabling is the 0-cost rank,
+    per eqlwiki and the game's own roster text), so "buy the next rank"
+    while enabled would tell the player to TURN THE ABILITY OFF."""
     if not owned:
         return items
     omap = {k.lower(): v for k, v in owned.items()}
+    toggle_bases = {re.sub(r":\s*(enabled|disabled)\s*$", "", k.lower()).strip()
+                    for k in omap if re.search(r":\s*(enabled|disabled)\s*$", k)}
     out = []
     for it in items:
         name = str(it.get("name") or "")
         m = re.search(r"^(.*?)[\s(]+ranks?\s*(\d+)\s*[)]?\s*$", name, re.I)
         base = (m.group(1) if m else name).strip().rstrip("(").strip()
+        tbase = re.sub(r":\s*(enabled|disabled)\s*$", "", base.lower()).strip()
+        if tbase in toggle_bases:
+            logger.info("Dropped AA rec — %s is a toggle AA (a purchase "
+                        "flips its state instead of upgrading it)", name)
+            continue
         want = int(m.group(2)) if m else None
         o = omap.get(base.lower())
         mt = meta.get(base.lower()) or {}
