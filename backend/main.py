@@ -1124,7 +1124,7 @@ async def api_llm_cli_set(body: dict):
     effort = body.get("effort")
     if effort is not None:
         effort = str(effort).strip().lower()
-        if effort and effort not in cli_llm.EFFORTS[provider]:
+        if effort and effort not in cli_llm.EFFORTS_ACCEPTED[provider]:
             raise HTTPException(400, f"effort for {provider} must be "
                                      + "|".join(cli_llm.EFFORTS[provider]))
     model = body.get("model")

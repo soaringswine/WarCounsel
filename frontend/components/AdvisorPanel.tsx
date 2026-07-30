@@ -45,6 +45,15 @@ const CLI_SHORT: Record<CliProvider, string> = {
   codex_cli: "codex",
 };
 
+/** FastAPI wraps error reasons as {"detail": "..."} — unwrap for display,
+ *  honoring escaped quotes (a naive [^"]+ once cut an API error down to
+ *  four characters at the first \" inside it). */
+function unwrapApiError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const m = msg.match(/"detail"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  return m ? m[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\") : msg;
+}
+
 const AGREEMENT_TEXT: Record<string, string> = {
   agree: "agrees with the 2nd check",
   partial: "partly agrees with the 2nd check",
@@ -561,10 +570,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
         a ? { ...a, doublechecks: { ...a.doublechecks, [slot]: r } } : a,
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // FastAPI wraps the reason as {"detail": "..."} — unwrap for display
-      const m = msg.match(/"detail"\s*:\s*"([^"]+)"/);
-      setDcError(m ? m[1] : msg);
+      setDcError(unwrapApiError(e));
     } finally {
       setDcBusy(null);
     }
@@ -582,9 +588,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
         g ? { ...g, doublechecks: { ...g.doublechecks, [slot]: r } } : g,
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      const m = msg.match(/"detail"\s*:\s*"([^"]+)"/);
-      setGearDcError(m ? m[1] : msg);
+      setGearDcError(unwrapApiError(e));
     } finally {
       setGearDcBusy(null);
     }

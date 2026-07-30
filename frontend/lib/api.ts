@@ -33,7 +33,10 @@ export async function apiSend<T>(
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`${res.status}: ${detail.slice(0, 200)}`);
+    // 600, not 200: FastAPI error bodies are {"detail": "..."} and CLI
+    // failures carry real diagnostics — a 200-char cut once reduced a
+    // useful "unsupported reasoning effort" message to 4 characters
+    throw new Error(`${res.status}: ${detail.slice(0, 600)}`);
   }
   return res.json();
 }

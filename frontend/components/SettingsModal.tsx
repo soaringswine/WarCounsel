@@ -52,10 +52,12 @@ type SettingsData = {
   };
 };
 
-/** Valid reasoning-effort values per coding-agent CLI. */
+/** Reasoning-effort values offered per coding-agent CLI. Codex support
+ *  varies by model — this list matches its current default models
+ *  ("minimal" was rejected live by one with a 400). */
 const CLI_EFFORTS: Record<string, string[]> = {
   claude_cli: ["low", "medium", "high", "xhigh", "max"],
-  codex_cli: ["minimal", "low", "medium", "high", "xhigh"],
+  codex_cli: ["none", "low", "medium", "high", "xhigh", "max"],
 };
 
 const PROVIDERS = [

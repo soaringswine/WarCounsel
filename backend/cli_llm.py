@@ -40,11 +40,18 @@ PROVIDERS = ("claude_cli", "codex_cli")
 
 LABELS = {"claude_cli": "Claude Code CLI", "codex_cli": "Codex CLI"}
 
-# valid --effort / model_reasoning_effort values per CLI (claude 2.1.220,
-# codex-cli 0.146) — the /api/llm/cli endpoint validates against these
+# Effort values OFFERED in the pickers (claude 2.1.220; codex per a live
+# API rejection naming its supported set — "minimal" was dropped after the
+# current codex default model 400'd on it mid-play). Codex support varies
+# BY MODEL, so validation accepts the superset below rather than blocking
+# an .env value an older model might still want.
 EFFORTS = {
     "claude_cli": ("low", "medium", "high", "xhigh", "max"),
-    "codex_cli": ("minimal", "low", "medium", "high", "xhigh"),
+    "codex_cli": ("none", "low", "medium", "high", "xhigh", "max"),
+}
+EFFORTS_ACCEPTED = {
+    "claude_cli": set(EFFORTS["claude_cli"]),
+    "codex_cli": set(EFFORTS["codex_cli"]) | {"minimal"},
 }
 
 
@@ -161,9 +168,15 @@ def _run_codex(exe: str, prompt: str, system: Optional[str],
                               timeout=settings.cli_timeout_s,
                               cwd=tempfile.gettempdir(), **_popen_kw())
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip()[-400:]
-            raise RuntimeError(f"codex CLI exited {proc.returncode}: "
-                               f"{tail or 'no output'}")
+            err = (proc.stderr or proc.stdout or "").strip()
+            # codex prints API failures as ERROR: {json}; the human part is
+            # the "message" field — a raw last-N-chars tail starts mid-JSON
+            # and once reached the UI as the 4 characters 'aram'
+            import re as _re
+            m = _re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', err)
+            detail = (m.group(1).replace('\\"', '"')
+                      if m else (err[-400:] or "no output"))
+            raise RuntimeError(f"codex CLI exited {proc.returncode}: {detail}")
         try:
             text = open(outfile, encoding="utf-8", errors="replace").read()
         except OSError:
