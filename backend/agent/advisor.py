@@ -840,6 +840,16 @@ async def _builtin_gear(ctx: dict) -> dict:
                "why": "owned exaltation stone (enable an LLM model for effect "
                       "details)"}
               for x in (ctx.get("exaltations") or [])]
+    table = _full_slot_table(recs, worn)
+    # hosted stones still gate here — this path computes no destinations
+    # (wiki round-trips), so the note says "find it a socket first" rather
+    # than pretending the displacement is free
+    stranded: dict = {}
+    for x in (ctx.get("exaltations") or []):
+        if x.get("host"):
+            stranded.setdefault(_item_base(x["host"]).lower(), []).append(
+                {"stone": x["name"], "eff": "", "movable": None})
+    _warn_displacements(table, stranded)
     return {
         "source": "builtin",
         "note": "Deterministic gear check — no LLM. Same-item higher-rank "
@@ -848,7 +858,7 @@ async def _builtin_gear(ctx: dict) -> dict:
                 "formula. 1H weapons compare by white-DPS index; procs, "
                 "2H and farming targets need a model from the "
                 "Counsel selector.",
-        "slots": _full_slot_table(recs, worn),
+        "slots": table,
         "farm": [], "exaltations": exalts, "unknown": [], "pet_gear": [],
     }
 
@@ -1245,7 +1255,7 @@ __CONTEXT__
 OWNED EQUIPMENT (from /outputfile inventory; [worn/bags/bank] shows where each lives; stats and drop sources are from the game's wiki):
 __GEAR__
 
-EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
+EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. Each socketed stone's line below states where it can LEGALLY move (machine-checked against real empty sockets — sockets unlock by merge rank, so an unmerged item has none): when it says NO legal empty socket exists, the stone cannot follow any winner — count it fully toward its host's value, and if you still recommend unseating that host, say plainly the effect is lost until a socket opens. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
 __EXALTS__
 
 __PET_BLOCK__
@@ -1288,6 +1298,30 @@ def _socket_type_from_export(x: dict) -> Optional[str]:
                or (host and "backpack" not in host.lower()
                    and not hl.lower().startswith("general")))
     return SOCKET_TYPES.get(x.get("socket")) if in_gear else None
+
+
+# Bard instruments have NO "Effect:" line on their wiki pages — the item IS
+# the effect (a song modifier). Before this table they fell through to
+# "no listed effect (stat stone?)", the prompt then valued them at zero,
+# and the model recommended swaps that stranded a Bard's drum and lute in
+# the Any Slots (reported from live play, 2026-07-29). Name-token match,
+# gated on the base item being Bard-equippable per its wiki Class line.
+_INSTRUMENT_KINDS = {
+    "drum": "percussion", "tambourine": "percussion",
+    "lute": "stringed", "mandolin": "stringed", "lyre": "stringed",
+    "flute": "wind", "piccolo": "wind",
+    "horn": "brass", "trumpet": "brass",
+}
+
+
+def _instrument_kind(base_name: str, line: Optional[str]) -> Optional[str]:
+    if not line or not re.search(r"Class: [^;|]*BRD", line):
+        return None
+    low = base_name.lower()
+    for tok, kind in _INSTRUMENT_KINDS.items():
+        if tok in low:
+            return kind
+    return None
 
 
 def _exalt_socket_type(effect: Optional[str]) -> str:
@@ -1359,6 +1393,37 @@ def _full_slot_table(slots: List[dict], worn: Optional[dict]) -> List[dict]:
     return out
 
 
+def _warn_displacements(table: List[dict], stranded: dict) -> None:
+    """Deterministic post-gate: a slot rec that unseats an exaltation host
+    gets the hosted stone spelled out in its why — with a hard warning when
+    the stone has nowhere legal to go. Added after live play showed a swap
+    that silently stranded a Bard's drum and lute: the model had been told
+    the stones had "no listed effect" and no destination data at all."""
+    for s in table:
+        cur = str(s.get("current") or "")
+        rec = str(s.get("recommend") or "")
+        if not cur or not rec:
+            continue
+        if _item_base(rec).lower() == _item_base(cur).lower():
+            continue  # keep rows and same-item rank upgrades displace nothing
+        for st in stranded.get(_item_base(cur).lower(), []):
+            if st.get("movable") is True:
+                note = (f" | Hosts {st['stone']} — move the stone to one of "
+                        "its legal empty sockets (Exaltations panel) BEFORE "
+                        "unequipping this item.")
+            elif st.get("movable") is False:
+                note = (f" | WARNING (deterministic): {cur} hosts "
+                        f"{st['stone']} ({st['eff']}) and NO owned item has "
+                        "a legal empty socket for it — this swap LOSES that "
+                        "effect until a socket opens (merging an item "
+                        "unlocks its sockets).")
+            else:  # builtin path: hosts known, destinations not computed
+                note = (f" | Hosts {st['stone']} — find it a legal new "
+                        "socket (Exaltations panel) BEFORE unequipping "
+                        "this item.")
+            s["why"] = (str(s.get("why") or "").rstrip() + note).strip()
+
+
 async def _item_meta(name: str) -> Optional[dict]:
     """{classes:set|None(ALL), slots:set, is_weapon, is_2h} from the wiki
     Slot/Skill/Class lines — None if no page."""
@@ -1406,6 +1471,17 @@ async def _exalt_targets(stone_name: str, styp: str,
                 socket_known = True
                 if need not in set(empt):
                     continue  # no empty socket of this type on that item
+            else:
+                # Bag/bank items carry NO socket rows — the export parses
+                # one level deep, so their sockets are structurally
+                # invisible. Still decidable from the +N: exalt socket
+                # type N unlocks at rank N-6 (+1 focus, +2 clicky, +3
+                # worn, +4 proc — every worn row of real exports fits,
+                # and live play confirms an unmerged item accepts no
+                # stone). Occupancy stays unknown, so this can over-offer
+                # an occupied socket; it never offers a nonexistent one.
+                if need - 6 > _item_rank(cand):
+                    continue
         tgt = await _item_meta(cand)
         if not tgt:
             continue
@@ -1582,6 +1658,7 @@ async def generate_gear_advice(ctx: dict) -> dict:
             _cand_seen.add(k)
             exalt_targets.append(_nm)
     from backend.game_data import _trio_usable, item_line as _gd_item_line
+    stranded_by_host: dict = {}  # host base (lower) -> hosted-stone facts
     for x in exalts:
         bname = re.sub(r"\s*[(]Exaltation[)]$", "", x["name"]).strip()
         eff = None
@@ -1590,7 +1667,17 @@ async def generate_gear_advice(ctx: dict) -> dict:
             full_line = await _gd_item_line(bname)
             if full_line:
                 m2 = re.search(r"(?:Focus )?Effect: [^;|]+", full_line)
-                eff = m2.group(0) if m2 else "no listed effect (stat stone?)"
+                if m2:
+                    eff = m2.group(0)
+                else:
+                    # Bard instruments carry no Effect line — the item IS
+                    # the effect. Naming that here is what stops the model
+                    # from writing off a Bard's drum as a worthless stone.
+                    kind = _instrument_kind(bname, full_line)
+                    eff = (f"Bard instrument ({kind}) — its {kind} song "
+                           "modifier applies while the stone sits in "
+                           "equipped gear; real value for a Bard"
+                           if kind else "no listed effect (stat stone?)")
                 usable = _trio_usable(full_line, classes)
         except Exception:
             pass
@@ -1617,11 +1704,6 @@ async def generate_gear_advice(ctx: dict) -> dict:
                            if have >= req else
                            f" — DORMANT until L{req} (they are L{have}: "
                            "worth ZERO right now)")
-        exalt_lines.append(f"{x['name']} — {host}"
-                           + (f" — grants {eff}" if eff else "")
-                           + f" — type: {styp} (fits {fits}){lvl_tag}{cls_tag}")
-        # deterministic, informational (NOT a move prescription — socketing
-        # compatibility rules are not reliably derivable from our data)
         eff_txt = re.sub(r"^(?:Focus )?Effect:\s*", "", eff or "").strip() if eff else ""
         if usable is False:
             status = "not usable by your classes"
@@ -1631,6 +1713,8 @@ async def generate_gear_advice(ctx: dict) -> dict:
             status = "stat stone"
         else:
             status = "active"
+        # deterministic, informational (NOT a move prescription — socketing
+        # compatibility rules are not reliably derivable from our data)
         elig = []
         if usable is not False and status != "stat stone":
             try:
@@ -1642,6 +1726,23 @@ async def generate_gear_advice(ctx: dict) -> dict:
             except Exception:
                 elig = []
         move = ", ".join(sorted({t for t in elig})[:6])
+        # the model must see, per stone, where it can legally go — "the
+        # stone follows the winner" is only true when a destination exists
+        move_clause = ""
+        if x.get("host") and usable is not False and status != "stat stone":
+            move_clause = (
+                f" — can legally move to: {move}" if move else
+                " — NO legal empty socket for it anywhere in owned gear "
+                "(sockets unlock by merge rank), so unseating its host "
+                "LOSES this effect")
+            stranded_by_host.setdefault(
+                _item_base(x["host"]).lower(), []).append(
+                {"stone": x["name"], "eff": eff_txt or "effect unknown",
+                 "movable": bool(elig)})
+        exalt_lines.append(f"{x['name']} — {host}"
+                           + (f" — grants {eff}" if eff else "")
+                           + f" — type: {styp} (fits {fits})"
+                           + f"{lvl_tag}{cls_tag}{move_clause}")
         exalt_info.append({
             "name": re.sub(r"\s*[(]Exaltation[)]$", "", x["name"]).strip(),
             "move_to": move,
@@ -1976,6 +2077,9 @@ async def generate_gear_advice(ctx: dict) -> dict:
                     r["where"] = None
                     r["why"] = ("— freed by the recommended 2H primary "
                                 "(occupies both hands)")
+    # runs on the FULL table, after current-item backfill, so a rec whose
+    # "current" the model left blank still gets its hosted stone flagged
+    _warn_displacements(table, stranded_by_host)
     return {**base, "source": "llm",
             "note": data.get("note"),
             "pet_gear": pet_gear,
