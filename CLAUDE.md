@@ -751,6 +751,28 @@ whenever the Inventory parse changes.
   Rule: PROC (Combat) stones need a shared class between SOURCE and TARGET
   item (weapon->weapon, 2H proc -> Primary only); focus/clicky/worn need
   shared class + same slot. All from wiki Class/Slot/Skill lines.
+  - **Bard instruments are exaltations with NO wiki Effect line** — the
+    item IS the effect (a song modifier). They used to fall through to
+    "no listed effect (stat stone?)", the prompt valued them at zero, and
+    the model recommended swaps that stranded a Bard's drum and lute
+    (live report, 2026-07-29). `_instrument_kind` (name token + Class:
+    BRD) now names them truthfully.
+  - **Sockets unlock by merge rank: exalt socket type N appears at rank
+    N-6** (+1 focus 7, +2 clicky 8, +3 worn 9, +4 proc 10 — every worn
+    row of real exports fits; user-confirmed an unmerged item accepts no
+    stone). Bag/bank items have NO socket rows in the export (it parses
+    one level deep), so `_exalt_targets` derives their sockets from the
+    +N instead of falling straight to wiki heuristics — an unmerged
+    challenger is never offered as a stone's destination. Occupancy of a
+    bag item's socket stays unknown: the rank rule can over-offer an
+    occupied socket, never a nonexistent one.
+  - **Displacement gate** (`_warn_displacements`, LLM + builtin paths):
+    every stone's prompt line states its legal destinations (or that NONE
+    exist), and any slot rec that unseats a stone's host gets that fact
+    appended to its why deterministically — "move the stone first" when a
+    destination exists, a hard LOSES-THIS-EFFECT warning when none does.
+    Recs are annotated, not dropped: the trade can still be right, but
+    never silently.
 - **Pet loadout** — pets are a BAG of N generic slots, NOT the player's
   slot layout (do not invent Head/Arms/Chest rows). Mechanics encoded:
   every pet is base Warrior + a secondary by pet type (Water=Rogue,
