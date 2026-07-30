@@ -1291,6 +1291,7 @@ Rules:
 - farm: 3-6 realistic upgrade targets for their level. STRONGLY prefer items whose drop data appears above or that you know drop in zones near their level; give the zone and the mob/vendor in "source". Never invent stats; mark uncertainty briefly in "why" when relying on memory.
 - Weapons: consider the classes' usable weapon skills; for a Monk trio prefer fist/blunt options. 1H weapon lines carry deterministic [white-DPS index: MH x / OH y] — USE THEM instead of raw damage/delay ratio: the main-hand damage bonus is a flat, delay-independent add (fast MH weapons carry it more often), the off-hand gets NO bonus and swings only part of the time, so the best MH is often NOT the best OH. Procs are NOT in the index — a strong proc can outweigh a small index gap (off-hand procs fire less often). For 2H: compare its DPS against the MH index + OH index SUM plus the stat difference.
 - exaltations: review where each exaltation is socketed vs what it grants. Recommend moves ONLY when clearly better (an unused bank exaltation with a strong effect, or an effect wasted on unused gear); "move_to" = the item to socket it into. Skip trivial shuffles; note uncertainty about socket compatibility.
+- ASSIGN ITEMS TO SLOTS JOINTLY, not greedily per row. Worn stats (AC/HP/attributes/resists/haste) apply identically from ANY slot the item can legally occupy — but weapon swings exist ONLY in Primary/Secondary, and Bash requires a shield in Secondary (WAR/PAL/SHD only). So position-INDEPENDENT items (shields kept for stats, spare armor) belong in Any Slots, and position-DEPENDENT value (a weapon that actually swings, an exaltation host that needs a specific slot) keeps the hand slots: for a dual-wield-capable character, shield-in-Any-Slot + weapon-still-swinging-in-Secondary beats shield-in-Secondary + weapon-parked. Before finalizing, check whether swapping any TWO of your recommendations between their slots wastes less; if it does, swap them and say so in both whys.
 """
 
 
@@ -1647,6 +1648,7 @@ async def generate_gear_advice(ctx: dict) -> dict:
     items = ctx.get("inventory_items") or []
     base = {
         "generated": datetime.now().isoformat(timespec="seconds"),
+        "llm": llm_active(),
         "context": {"classes": ctx.get("class_str"), "level": ctx.get("level"),
                     "race": ctx.get("race"),
                     "items": len(items)},
@@ -1945,6 +1947,11 @@ async def generate_gear_advice(ctx: dict) -> dict:
               .replace("__CONTEXT__", chr(10).join(lines))
               .replace("__GEAR__", chr(10).join(gear["lines"]))
               .replace("__EXALTS__", chr(10).join(exalt_lines) or "none owned"))
+    # the briefing, kept for the gear double-check. Deliberately NOT built
+    # on the deterministic path: it needs the full mined gear context, so
+    # a builtin gear cache simply has no briefing and the check endpoint
+    # says to re-consult with a model instead.
+    base["_prompt"] = prompt
     budget = await asyncio.to_thread(_lmstudio_budget, len(prompt))
     llm = get_llm()
     bound = llm

@@ -193,6 +193,64 @@ function HuntChart({ data, picked }: { data: HuntingData; picked: string[] }) {
   );
 }
 
+/** One check review, rendered identically under the counsel and the gear
+ *  table. Carries the model/effort/duration meta, the structured stance
+ *  toward the earlier check when present, and the shape-enforced issues. */
+function ReviewBlock({ dc, label }: { dc: DoubleCheck; label: string }) {
+  return (
+    <div className="adv-dc-review">
+      <div className="adv-dc-bar">
+        <span className="adv-dc-verdict" data-v={dc.verdict}>
+          {dc.verdict.replace("_", " ")}
+        </span>
+        <span className="adv-dc-title">
+          {label} — {dc.model}
+          {dc.effort ? ` · ${dc.effort} effort` : ""} · {dc.duration_s}s
+          {dc.cost_usd ? ` · $${dc.cost_usd.toFixed(2)}` : ""}
+        </span>
+        {dc.prior_agreement && (
+          <span className="adv-dc-agree" data-a={dc.prior_agreement}>
+            {AGREEMENT_TEXT[dc.prior_agreement]}
+          </span>
+        )}
+      </div>
+      {dc.prior_notes && <p className="adv-dc-endorse">{dc.prior_notes}</p>}
+      {dc.summary && <p className="adv-dc-summary">{dc.summary}</p>}
+      {dc.issues.length > 0 && (
+        <ul className="adv-list adv-dc-issues">
+          {dc.issues.map((iss, i) => (
+            <li key={i} data-dim={iss.unmatched || undefined}>
+              <span className="adv-dc-sev" data-sev={iss.severity}>
+                {iss.severity}
+              </span>{" "}
+              <span className="adv-cls">[{iss.section}]</span>{" "}
+              <strong>{iss.item}</strong>
+              {iss.unmatched && (
+                <span className="adv-cls">
+                  {" "}(names something not in the counsel above)
+                </span>
+              )}
+              <br />
+              {iss.problem}
+              {iss.fix && (
+                <>
+                  <br />
+                  <span className="adv-dc-fix">fix: {iss.fix}</span>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {dc.endorsements.length > 0 && (
+        <p className="adv-dc-endorse">
+          Confirmed right: {dc.endorsements.join(" · ")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** Class-trio counsel: spells to learn, AA spending order, upcoming unlocks,
  *  and picks for the current zone. The backend grounds the counsel in EQL
  *  wiki data (via MCP) and generates it with the configured LLM, caching it
@@ -209,6 +267,8 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [error, setError] = useState<string | null>(null);
   const [dcBusy, setDcBusy] = useState<"second" | "third" | null>(null);
   const [dcError, setDcError] = useState<string | null>(null);
+  const [gearDcBusy, setGearDcBusy] = useState<"second" | "third" | null>(null);
+  const [gearDcError, setGearDcError] = useState<string | null>(null);
   const [dcDebug, setDcDebug] = useState(false);
   const [cliDraft, setCliDraft] = useState<
     Record<string, { model: string; effort: string }>
@@ -446,6 +506,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
 
   const consultGear = async (refresh: boolean) => {
     setGearLoading(true);
+    setGearDcError(null); // fresh table — an old check error is moot
     try {
       setGear(await apiGet<GearAdvice>(`/api/gear${refresh ? "?refresh=1" : ""}`));
     } catch {
@@ -506,6 +567,26 @@ export const AdvisorPanel = memo(function AdvisorPanel({
       setDcError(m ? m[1] : msg);
     } finally {
       setDcBusy(null);
+    }
+  };
+
+  // Same check slots, gear-shaped rubric: the reviewer sees the whole
+  // slot table at once, which is exactly the joint-assignment view the
+  // per-row consult lacks about its own output.
+  const doubleCheckGear = async (slot: "second" | "third") => {
+    setGearDcBusy(slot);
+    setGearDcError(null);
+    try {
+      const r = await apiSend<DoubleCheck>("/api/gear/doublecheck", { slot });
+      setGear((g) =>
+        g ? { ...g, doublechecks: { ...g.doublechecks, [slot]: r } } : g,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const m = msg.match(/"detail"\s*:\s*"([^"]+)"/);
+      setGearDcError(m ? m[1] : msg);
+    } finally {
+      setGearDcBusy(null);
     }
   };
 
@@ -824,50 +905,8 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                 const dc = advice.doublechecks?.[slot];
                 if (!dc || dcBusy === slot) return null;
                 return (
-                  <div key={slot} className="adv-dc-review">
-                    <div className="adv-dc-bar">
-                      <span className="adv-dc-verdict" data-v={dc.verdict}>
-                        {dc.verdict.replace("_", " ")}
-                      </span>
-                      <span className="adv-dc-title">
-                        {slot === "second" ? "2nd" : "3rd"} check — {dc.model}
-                        {dc.effort ? ` · ${dc.effort} effort` : ""} · {dc.duration_s}s
-                        {dc.cost_usd ? ` · $${dc.cost_usd.toFixed(2)}` : ""}
-                      </span>
-                    </div>
-                    {dc.summary && <p className="adv-dc-summary">{dc.summary}</p>}
-                    {dc.issues.length > 0 && (
-                      <ul className="adv-list adv-dc-issues">
-                        {dc.issues.map((iss, i) => (
-                          <li key={i} data-dim={iss.unmatched || undefined}>
-                            <span className="adv-dc-sev" data-sev={iss.severity}>
-                              {iss.severity}
-                            </span>{" "}
-                            <span className="adv-cls">[{iss.section}]</span>{" "}
-                            <strong>{iss.item}</strong>
-                            {iss.unmatched && (
-                              <span className="adv-cls">
-                                {" "}(names something not in the counsel above)
-                              </span>
-                            )}
-                            <br />
-                            {iss.problem}
-                            {iss.fix && (
-                              <>
-                                <br />
-                                <span className="adv-dc-fix">fix: {iss.fix}</span>
-                              </>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    {dc.endorsements.length > 0 && (
-                      <p className="adv-dc-endorse">
-                        Confirmed right: {dc.endorsements.join(" · ")}
-                      </p>
-                    )}
-                  </div>
+                  <ReviewBlock key={slot} dc={dc}
+                               label={slot === "second" ? "2nd check" : "3rd check"} />
                 );
               })}
               {dcDebug && (
@@ -1250,6 +1289,51 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                 </div>
               )}
               {gear?.note && <div className="adv-note">{gear.note}</div>}
+              {gear && (
+                <div className="adv-dc">
+                  <div className="adv-dc-bar">
+                    <span className="adv-dc-title">
+                      Second opinions on the gear table — reviewed as a whole
+                      (uses the check models configured in the counsel section)
+                    </span>
+                    {(["second", "third"] as const).map((slot) => (
+                      <button
+                        key={slot}
+                        type="button"
+                        className="adv-rescan adv-gear-btn adv-dc-btn"
+                        onClick={() => doubleCheckGear(slot)}
+                        disabled={
+                          gearDcBusy !== null || gearLoading ||
+                          (llm?.checks?.[slot] ?? (slot === "second" ? "claude_cli" : "none")) === "none"
+                        }
+                        title="Reviews the whole gear table jointly against the exact briefing the gear advisor saw — including whether any two recommendations should trade slots"
+                      >
+                        {gearDcBusy === slot
+                          ? "checking…"
+                          : `${gear.doublechecks?.[slot] ? "re-run" : "run"} ${slot === "second" ? "2nd" : "3rd"} check`}
+                      </button>
+                    ))}
+                  </div>
+                  {gearDcBusy && (
+                    <div className="adv-gear-loading" role="status" aria-live="polite">
+                      <span className="adv-gear-spin" aria-hidden />
+                      Running the gear {gearDcBusy === "second" ? "2nd" : "3rd"} check —
+                      re-deriving the table from the briefing… (can take minutes)
+                    </div>
+                  )}
+                  {gearDcError && (
+                    <p className="adv-dc-error" role="alert">{gearDcError}</p>
+                  )}
+                  {(["second", "third"] as const).map((slot) => {
+                    const dc = gear.doublechecks?.[slot];
+                    if (!dc || gearDcBusy === slot) return null;
+                    return (
+                      <ReviewBlock key={slot} dc={dc}
+                                   label={slot === "second" ? "gear 2nd check" : "gear 3rd check"} />
+                    );
+                  })}
+                </div>
+              )}
               {gear && gear.slots.length > 0 && (
                 <table className="adv-table">
                   <thead>
