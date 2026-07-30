@@ -441,7 +441,14 @@ throttled `state` pushes. REST highlights (see main.py for all):
   review. Rides the advice cache. `POST /api/llm/checks` assigns a
   provider (any, or "none") to each slot; `POST /api/llm/cli` sets a CLI
   provider's model/effort WITHOUT switching the active provider (clears
-  consult caches only when the edited provider IS active)
+  consult caches only when the edited provider IS active).
+  `POST /api/gear/doublecheck {slot}` is the gear twin: same check
+  slots, gear-shaped rubric that reviews the slot table JOINTLY —
+  assignment-across-slots waste (shield parked in a hand while a
+  swinging weapon sits in an Any Slot) is row-wise invisible, so no
+  per-row gate can catch it. Deterministic gear counsel stashes no
+  briefing and therefore cannot be checked (409 says to re-consult with
+  a model)
 - `GET/POST /api/llm` — runtime model switch; clears both consult caches
 - `GET /api/hunting` — deterministic leveling-zone candidates (Gantt chart)
 - `GET /api/spellbook|aas|exports` · `POST /api/exports/refresh|aas/rescan`

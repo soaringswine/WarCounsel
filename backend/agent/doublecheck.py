@@ -43,6 +43,37 @@ SYSTEM_PROMPT = (
     "requested — no markdown fences, no prose around it."
 )
 
+REVIEW_TASK_GEAR = """=== YOUR TASK ===
+Double-check the gear counsel against the briefing. Look for:
+- slot recs that violate the briefing: unowned items, wrong equip slot, STATS UNKNOWN items replaced, comparisons that ignore the pre-scaled +N numbers, a Secondary rec alongside a 2H primary
+- JOINT-ASSIGNMENT waste — the most valuable check: worn stats apply identically from any legal slot, but weapon swings exist only in Primary/Secondary (and Bash needs a shield in Secondary for WAR/PAL/SHD). Flag any pair of recs that would waste less if swapped between their slots (e.g. a shield recommended into Secondary while a swinging-capable weapon gets parked in an Any Slot), and give the better assignment as the fix
+- stranded exaltations: a rec that unseats a stone's host — trust each stone's machine-checked destination line; flag advice that contradicts it
+- Any Slot picks justified by weapon DMG/Delay (they contribute nothing there; BACKSTAB is the exception)
+- farm targets that are unrealistic for the level or contradict the briefing's drop data
+- pet_gear picks that violate the stated pet rules (weapon delay/ratio reasoning, duplicate categories, items better than the player's own)
+- anything important the data supports that the advisor failed to say ("missing" — e.g. an obvious merge opportunity or an ignored clicky)
+
+Reply with ONLY this JSON object:
+{
+  "verdict": "sound" | "minor_issues" | "major_issues",
+  "summary": "2-4 plain sentences: overall quality and the single most important correction",
+  "issues": [
+    {"section": "slots|farm|exaltations|merges|clickies|pet_gear|missing",
+     "item": "the advised entry at fault — or, for section 'missing', the thing left unsaid",
+     "problem": "what is wrong, citing the briefing data",
+     "fix": "the concrete correction (owned items only), or null",
+     "severity": "major" | "minor"}
+  ],
+  "endorsements": ["up to 3 short notes on advice that is notably right and worth trusting"]
+}
+
+Rules:
+- Every issue must be grounded in the briefing. If the briefing lacks the data to judge something, say so in summary instead of guessing.
+- Any item you name in a fix must be OWNED per the briefing's gear list.
+- Judge the CONTENT, not the app's structure (the 24-slot table shape is fixed).
+- An empty issues list with verdict "sound" is a perfectly good answer — do not manufacture nitpicks.
+"""
+
 REVIEW_TASK = """=== YOUR TASK ===
 Double-check the counsel against the briefing. Look for:
 - loadout picks that violate the briefing's rules: unowned or over-level picks that slipped through, spells superseded by a better owned spell, travel/resurrection misuse, picks that ignore the stated focus/playstyle, wasted slots, and clearly better OWNED spells the advisor passed over
@@ -78,8 +109,13 @@ Rules:
 _PRIVATE_KEYS = ("_prompt", "doublecheck", "doublechecks", "stale")
 
 _SEVERITIES = {"major", "minor"}
-_SECTIONS = {"loadout", "prebuffs", "replace", "aa_now", "aa_save",
-             "horizon", "locations", "class_notes", "missing"}
+_SECTIONS = {
+    "advisor": {"loadout", "prebuffs", "replace", "aa_now", "aa_save",
+                "horizon", "locations", "class_notes", "missing"},
+    "gear": {"slots", "farm", "exaltations", "merges", "clickies",
+             "pet_gear", "missing"},
+}
+_TASKS = {"advisor": REVIEW_TASK, "gear": REVIEW_TASK_GEAR}
 
 
 def _public_advice(advice: dict) -> dict:
@@ -87,7 +123,8 @@ def _public_advice(advice: dict) -> dict:
 
 
 def build_review_prompt(briefing: str, advice: dict,
-                        prior: Optional[dict] = None) -> str:
+                        prior: Optional[dict] = None,
+                        kind: str = "advisor") -> str:
     counsel = json.dumps(_public_advice(advice), indent=1, ensure_ascii=False)
     parts = [
         "=== THE ADVISOR'S FULL BRIEFING (the exact data and rules it saw) ===",
@@ -112,7 +149,7 @@ def build_review_prompt(briefing: str, advice: dict,
             "in the briefing.",
             "",
         ]
-    parts.append(REVIEW_TASK)
+    parts.append(_TASKS.get(kind) or REVIEW_TASK)
     if prior:
         parts.append(
             '\nBecause an earlier check exists, ALSO include these two keys '
@@ -123,7 +160,9 @@ def build_review_prompt(briefing: str, advice: dict,
     return "\n".join(parts)
 
 
-def _clean_issues(items: Any, advice_blob: str) -> List[dict]:
+def _clean_issues(items: Any, advice_blob: str,
+                  kind: str = "advisor") -> List[dict]:
+    sections = _SECTIONS.get(kind) or _SECTIONS["advisor"]
     out: List[dict] = []
     for it in items or []:
         if not (isinstance(it, dict) and it.get("problem")):
@@ -131,7 +170,7 @@ def _clean_issues(items: Any, advice_blob: str) -> List[dict]:
         section = str(it.get("section") or "").strip().lower()
         sev = str(it.get("severity") or "").strip().lower()
         issue = {
-            "section": section if section in _SECTIONS else "other",
+            "section": section if section in sections else "other",
             "item": str(it.get("item") or "").strip(),
             "problem": str(it.get("problem")).strip(),
             "fix": (str(it["fix"]).strip()
@@ -175,13 +214,17 @@ async def _ask(provider: str, prompt: str) -> tuple:
 
 async def run_doublecheck(briefing: str, advice: dict, provider: str,
                           slot: str = "second",
-                          prior: Optional[dict] = None) -> dict:
-    """Review the displayed counsel with the given provider. Returns the
-    review dict, or {"error": ...} — never raises, never fakes a review."""
+                          prior: Optional[dict] = None,
+                          kind: str = "advisor") -> dict:
+    """Review the displayed counsel with the given provider. `kind` picks
+    the review rubric — "advisor" (spells/AA) or "gear" (the slot table,
+    reviewed JOINTLY — the assignment-across-slots miss is precisely what
+    a per-row advisor cannot see about its own output). Returns the review
+    dict, or {"error": ...} — never raises, never fakes a review."""
     if provider in ("none", "", None):
         return _error("This check slot is set to none — pick a model for it "
                       "next to the check button.")
-    prompt = build_review_prompt(briefing, advice, prior)
+    prompt = build_review_prompt(briefing, advice, prior, kind)
     started = datetime.now()
     try:
         text, meta = await _ask(provider, prompt)
@@ -200,7 +243,7 @@ async def run_doublecheck(briefing: str, advice: dict, provider: str,
     verdict = str(data.get("verdict") or "").strip().lower()
     if verdict not in ("sound", "minor_issues", "major_issues"):
         verdict = "minor_issues"
-    issues = _clean_issues(data.get("issues"), advice_blob)
+    issues = _clean_issues(data.get("issues"), advice_blob, kind)
     if not issues and verdict != "sound":
         # a verdict with zero surviving issues is an empty accusation
         verdict = "sound"

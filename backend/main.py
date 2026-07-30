@@ -1459,6 +1459,44 @@ async def get_gear(refresh: bool = False, cached: bool = False):
     return advice
 
 
+@app.post("/api/gear/doublecheck")
+async def gear_doublecheck(body: dict | None = None):
+    """Run one check slot on the CURRENT gear counsel — same check-slot
+    config as the advisor checks, but a gear-shaped rubric that reviews
+    the slot table JOINTLY (assignment-across-slots waste is exactly what
+    the per-row consult cannot see about its own output). Deterministic
+    gear counsel carries no briefing, so it cannot be double-checked —
+    the model path stashes the exact prompt at consult time."""
+    global _gear_cache
+    slot = str((body or {}).get("slot") or "second").strip()
+    if slot not in ("second", "third"):
+        raise HTTPException(400, "slot must be second|third")
+    if _gear_cache is None:
+        raise HTTPException(409, "No gear counsel to double-check — press "
+                                 "consult gear first.")
+    if not _gear_cache.get("_prompt"):
+        raise HTTPException(409, "This gear counsel has no stored briefing "
+                                 "(deterministic mode or a pre-doublecheck "
+                                 "cache) — pick a model in the Counsel "
+                                 "selector and re-consult gear first.")
+    from backend.agent.doublecheck import run_doublecheck
+    from backend.llm_runtime import checks
+    provider = checks().get(slot, "none")
+    if provider == "none":
+        raise HTTPException(409, f"No model assigned to the {slot} check — "
+                                 "pick one in its selector.")
+    reviews = dict(_gear_cache.get("doublechecks") or {})
+    prior = reviews.get("second") if slot == "third" else None
+    review = await run_doublecheck(_gear_cache["_prompt"], _gear_cache,
+                                   provider, slot, prior, kind="gear")
+    if review.get("error"):
+        raise HTTPException(502, review["error"])
+    reviews[slot] = review
+    _gear_cache = {**_gear_cache, "doublechecks": reviews}
+    _save_advice_cache()
+    return review
+
+
 @app.get("/api/trio-compare")
 async def trio_compare(db: Session = Depends(get_db)):
     """Per-trio performance across stored encounters — 'does WAR/BRD/DRU

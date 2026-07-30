@@ -412,6 +412,11 @@ export interface GearAdvice {
   stale?: boolean;
   pet_gear?: PetGear[];
   merges?: GearMerge[];
+  /** second/third opinions on the gear table (same check slots as the
+   *  counsel checks, gear-shaped rubric — reviews the table JOINTLY) */
+  doublechecks?: { second?: DoubleCheck; third?: DoubleCheck };
+  /** which provider/model was configured when this was produced */
+  llm?: { provider: string; model: string };
   source: "llm" | "builtin";
   generated: string;
   note: string | null;
