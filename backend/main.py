@@ -8,6 +8,7 @@ FastAPI app that:
 Run: uvicorn backend.main:app --reload
 """
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -121,6 +122,37 @@ ocr_watcher: Optional[OcrWatcher] = None
 _character_id: Optional[int] = None
 _last_state_broadcast = 0.0
 ADVICE_CACHE_FILE = data_path("advice_cache.json")
+
+
+def _advisor_code_rev() -> str:
+    """Cached counsel must not outlive the knowledge encoded in the
+    prompts. A briefing is frozen at consult time and the checks AND
+    revisions deliberately review against the STORED briefing — so a
+    prompt correction never reaches an already-cached consult, and a
+    disproven claim keeps cascading through the whole chain (live case:
+    the exalt slot-restriction overclaim resurfaced in a gear revision a
+    day after the prompts were fixed, because the cached gear briefing
+    still asserted it). Hashing the advisor source folds "the prompts or
+    gates changed" into the consult signature: the tab then shows the
+    stale banner and the next Consult regenerates the briefing. Frozen
+    builds may not ship readable source — APP_VERSION covers those,
+    changing once per release."""
+    try:
+        from backend.agent import advisor as _adv
+        return hashlib.sha1(
+            Path(_adv.__file__).read_bytes()).hexdigest()[:10]
+    except Exception:
+        return APP_VERSION
+
+
+_ADVISOR_REV = None  # computed on first use; APP_VERSION is defined below
+
+
+def _sig_rev() -> str:
+    global _ADVISOR_REV
+    if _ADVISOR_REV is None:
+        _ADVISOR_REV = _advisor_code_rev()
+    return _ADVISOR_REV
 
 
 def _sig_norm(sig: tuple) -> tuple:
@@ -1357,7 +1389,8 @@ async def get_advisor(refresh: bool = False, cached: bool = False):
            tracker.aa_available, tracker.spell_slots,
            book["updated"] if book else None, tracker._last_aa_seen,
            inv_sig["updated"] if inv_sig else None,
-           miss_sig["updated"] if miss_sig else None)
+           miss_sig["updated"] if miss_sig else None,
+           _sig_rev())
     sig = _sig_norm(sig)
     if _advice_cache is not None and _advice_sig == sig and not refresh:
         return {**_advice_cache, "stale": False}
@@ -1507,7 +1540,8 @@ async def get_gear(refresh: bool = False, cached: bool = False):
     sig = (tracker.class_str, tracker.level, tracker.race, tracker.pet_slots,
            tracker.max_hp, tracker.max_mana,
            tuple(sorted(tracker.pet_inventory.items())),
-           inv["updated"] if inv else None)
+           inv["updated"] if inv else None,
+           _sig_rev())
     sig = _sig_norm(sig)
     if _gear_cache is not None and _gear_sig == sig and not refresh:
         return {**_gear_cache, "stale": False}
