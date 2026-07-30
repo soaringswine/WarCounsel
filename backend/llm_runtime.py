@@ -62,6 +62,39 @@ def model_for(provider: str) -> str:
     return settings.model                      # lmstudio
 
 
+def effort_for(provider: str) -> str:
+    """Reasoning effort for a CLI provider ("" for everything else — API
+    providers have no effort knob here). Runtime choice wins over .env."""
+    cfg = _load()
+    if provider == "claude_cli":
+        return cfg.get("claude_cli_effort") or settings.claude_cli_effort
+    if provider == "codex_cli":
+        return cfg.get("codex_cli_effort") or settings.codex_cli_effort
+    return ""
+
+
+def set_cli_prefs(provider: str, model: str | None = None,
+                  effort: str | None = None) -> dict:
+    """Persist a CLI provider's model/effort WITHOUT touching the active
+    provider — the check slots edit CLI prefs while something else stays
+    primary. An empty model clears the runtime override (back to .env /
+    the CLI's own default)."""
+    cfg = _load()
+    if model is not None:
+        key = f"{provider}_model"
+        if model.strip():
+            cfg[key] = model.strip()
+        else:
+            cfg.pop(key, None)
+    if effort is not None and effort.strip():
+        cfg[f"{provider}_effort"] = effort.strip()
+    _CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    _CONFIG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    logger.info("CLI prefs for %s: model=%s effort=%s", provider,
+                model_for(provider), effort_for(provider))
+    return {"model": model_for(provider), "effort": effort_for(provider)}
+
+
 def active() -> dict:
     cfg = _load()
     provider = cfg.get("provider") or settings.llm_provider
@@ -132,8 +165,11 @@ class _CliChat:
         prompt = "\n\n".join(
             str(getattr(m, "content", m)) for m in messages
             if str(getattr(m, "content", m)).strip())
+        # effort resolves at CALL time, not build time — the chat-model
+        # cache keys on (provider, model) and must not pin a stale effort
         text, _meta = await cli_llm.arun(self.provider, prompt,
-                                         model=self.model)
+                                         model=self.model,
+                                         effort=effort_for(self.provider))
         return SimpleNamespace(content=text, additional_kwargs={},
                                response_metadata={})
 

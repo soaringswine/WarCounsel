@@ -13,22 +13,70 @@ const CLASSES = [
 
 const TRIO_LABELS = ["Primary", "Secondary", "Tertiary"] as const;
 
-/** Providers whose model id is editable inline next to the selector. */
-const MODEL_EDIT_PROVIDERS = ["openai", "custom", "claude_cli", "codex_cli"];
+/** Providers whose model id is a plain text field next to the selector.
+ *  The CLI providers get their own model+effort pickers instead. */
+const MODEL_EDIT_PROVIDERS = ["openai", "custom"];
 
 const MODEL_FIELD_LABEL: Record<string, string> = {
   openai: "OpenAI model",
   custom: "Custom model",
-  claude_cli: "Claude CLI model",
-  codex_cli: "Codex CLI model",
 };
 
 const MODEL_FIELD_HINT: Record<string, string> = {
   openai: "o3",
   custom: "model id",
-  claude_cli: "claude-opus-5",
-  codex_cli: "blank = codex default",
 };
+
+const CLI_PROVIDERS = ["claude_cli", "codex_cli"] as const;
+type CliProvider = (typeof CLI_PROVIDERS)[number];
+
+const isCli = (p: string | undefined | null): p is CliProvider =>
+  p === "claude_cli" || p === "codex_cli";
+
+/** Datalist SUGGESTIONS only — free text is always allowed, since both
+ *  vendors ship new model ids faster than this list can chase them. */
+const CLI_MODEL_SUGGESTIONS: Record<CliProvider, string[]> = {
+  claude_cli: ["claude-opus-5", "claude-sonnet-5", "claude-fable-5", "haiku"],
+  codex_cli: ["gpt-5.1-codex-max", "gpt-5.1-codex", "gpt-5.1-codex-mini"],
+};
+
+const CLI_SHORT: Record<CliProvider, string> = {
+  claude_cli: "claude",
+  codex_cli: "codex",
+};
+
+const AGREEMENT_TEXT: Record<string, string> = {
+  agree: "agrees with the 2nd check",
+  partial: "partly agrees with the 2nd check",
+  disagree: "disagrees with the 2nd check",
+};
+
+/** Per-item cross-reference of the two check reviews, deterministic from
+ *  their issue lists: who flagged what, and where they split. */
+function issueMatrix(second?: DoubleCheck, third?: DoubleCheck) {
+  if (!second || !third) return [];
+  const rows = new Map<string, { item: string; second?: string; third?: string }>();
+  const add = (slot: "second" | "third", dc: DoubleCheck) => {
+    for (const iss of dc.issues) {
+      const key = (iss.item || iss.problem).toLowerCase().trim();
+      const row = rows.get(key) ?? { item: iss.item || `${iss.problem.slice(0, 60)}…` };
+      row[slot] = iss.severity;
+      rows.set(key, row);
+    }
+  };
+  add("second", second);
+  add("third", third);
+  return Array.from(rows.values()).map((r) => ({
+    ...r,
+    stance:
+      r.second && r.third
+        ? "both checks flag this"
+        : r.second
+          ? "only the 2nd check raised this"
+          : "only the 3rd check raised this",
+    split: !(r.second && r.third),
+  }));
+}
 
 const HG_TICKS = [10, 20, 30, 40, 50, 60];
 const HG_MIN = 1;
@@ -161,6 +209,10 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [error, setError] = useState<string | null>(null);
   const [dcBusy, setDcBusy] = useState<"second" | "third" | null>(null);
   const [dcError, setDcError] = useState<string | null>(null);
+  const [dcDebug, setDcDebug] = useState(false);
+  const [cliDraft, setCliDraft] = useState<
+    Record<string, { model: string; effort: string }>
+  >({});
   const [aaDraft, setAaDraft] = useState("");
   const [slotsDraft, setSlotsDraft] = useState("");
   const [petSlotsDraft, setPetSlotsDraft] = useState("");
@@ -216,6 +268,62 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     }
   };
 
+  // seed the CLI model/effort drafts once per provider — never clobber a
+  // draft mid-typing when the llm info object refreshes
+  useEffect(() => {
+    if (!llm?.cli) return;
+    const cli = llm.cli;
+    setCliDraft((prev) => {
+      const next = { ...prev };
+      for (const [p, c] of Object.entries(cli)) {
+        if (!next[p]) {
+          next[p] = { model: c.model === "default" ? "" : c.model, effort: c.effort };
+        }
+      }
+      return next;
+    });
+  }, [llm?.cli]);
+
+  // chain-detail (debug) toggle survives reloads, like the layout prefs
+  useEffect(() => {
+    setDcDebug(localStorage.getItem("adv-dc-debug") === "1");
+  }, []);
+  const toggleDcDebug = () =>
+    setDcDebug((v) => {
+      localStorage.setItem("adv-dc-debug", v ? "0" : "1");
+      return !v;
+    });
+
+  // Persist a CLI provider's model/effort WITHOUT switching the primary —
+  // a check slot's picker must never steal the Counsel selector.
+  const saveCliPrefs = async (p: CliProvider, patch: { model?: string; effort?: string }) => {
+    try {
+      const r = await apiSend<{ provider: string; model: string; effort: string }>(
+        "/api/llm/cli", { provider: p, ...patch });
+      setCliDraft((d) => ({
+        ...d,
+        [p]: { model: r.model === "default" ? "" : r.model, effort: r.effort },
+      }));
+      setLlm((prev) => {
+        if (!prev) return prev;
+        const label = `${p === "claude_cli" ? "Claude Code CLI" : "Codex CLI"} — ${r.model}`;
+        return {
+          ...prev,
+          cli: prev.cli
+            ? { ...prev.cli, [p]: { ...prev.cli[p], model: r.model, effort: r.effort } }
+            : prev.cli,
+          options: prev.options?.map((o) =>
+            o.provider === p ? { ...o, model: r.model, label } : o),
+          active: prev.active.provider === p
+            ? { ...prev.active, model: r.model }
+            : prev.active,
+        };
+      });
+    } catch {
+      /* backend offline */
+    }
+  };
+
   useEffect(() => {
     setAaDraft(snap?.aa_available == null ? "" : String(snap.aa_available));
   }, [snap?.aa_available]);
@@ -235,6 +343,46 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     } catch {
       /* backend offline */
     }
+  };
+
+  /** Model (datalist: suggestions + free text) and effort pickers for one
+   *  CLI provider. Per-PROVIDER prefs: the same claude_cli settings apply
+   *  wherever it is used (primary or either check slot), and multiple
+   *  pickers for one provider stay in sync through saveCliPrefs. */
+  const cliPicker = (p: CliProvider) => {
+    const info = llm?.cli?.[p];
+    if (!info) return null;
+    const d = cliDraft[p] ?? {
+      model: info.model === "default" ? "" : info.model,
+      effort: info.effort,
+    };
+    return (
+      <span className="adv-cli-prefs">
+        <input
+          list={`cli-models-${p}`}
+          value={d.model}
+          placeholder={p === "codex_cli" ? "codex default" : "model"}
+          spellCheck={false}
+          onChange={(e) =>
+            setCliDraft((x) => ({ ...x, [p]: { ...d, model: e.target.value } }))
+          }
+          onBlur={() => saveCliPrefs(p, { model: d.model.trim() })}
+          onKeyDown={(e) => e.key === "Enter" && saveCliPrefs(p, { model: d.model.trim() })}
+          aria-label={`${CLI_SHORT[p]} CLI model`}
+          title="Model — pick a suggestion or type any id this CLI accepts; blank = the CLI's own default"
+        />
+        <select
+          value={d.effort}
+          onChange={(e) => saveCliPrefs(p, { effort: e.target.value })}
+          aria-label={`${CLI_SHORT[p]} CLI reasoning effort`}
+          title="Reasoning effort — how long the model thinks before answering"
+        >
+          {info.efforts.map((ef) => (
+            <option key={ef} value={ef}>{ef}</option>
+          ))}
+        </select>
+      </span>
+    );
   };
 
   const setTrioAt = (i: number, cls: string) => {
@@ -510,7 +658,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
             <input
               id="adv-llm-model"
               type="text"
-              value={llmModelDraft === "default" ? "" : llmModelDraft}
+              value={llmModelDraft}
               placeholder={MODEL_FIELD_HINT[llm.active.provider]}
               onChange={(e) => setLlmModelDraft(e.target.value)}
               onBlur={() =>
@@ -522,6 +670,14 @@ export const AdvisorPanel = memo(function AdvisorPanel({
             />
           </div>
         )}
+        {llm && isCli(llm.active.provider) && (
+          <div className="adv-field">
+            <label>
+              {CLI_SHORT[llm.active.provider]} CLI model · effort
+            </label>
+            {cliPicker(llm.active.provider)}
+          </div>
+        )}
         {llm?.active.provider === "openai" && !llm.openai_key_set && (
           <span className="adv-llm-warn" role="alert">
             No OPENAI_API_KEY in .env — consults will fall back to local data. Paste the key, restart the backend.
@@ -530,6 +686,13 @@ export const AdvisorPanel = memo(function AdvisorPanel({
         <button className="adv-consult" onClick={() => consult(true)} disabled={loading}>
           {loading ? "Consulting…" : "Consult"}
         </button>
+        {CLI_PROVIDERS.map((p) => (
+          <datalist key={p} id={`cli-models-${p}`}>
+            {CLI_MODEL_SUGGESTIONS[p].map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+        ))}
       </div>
 
       <div className="adv-sync">
@@ -608,40 +771,45 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                   the exact data the advisor saw. The 3rd check also weighs the
                   2nd&apos;s findings.
                 </span>
-                {(["second", "third"] as const).map((slot) => (
-                  <span key={slot} className="adv-dc-slot">
-                    <label htmlFor={`adv-dc-${slot}`}>
-                      {slot === "second" ? "2nd" : "3rd"}
-                    </label>
-                    <select
-                      id={`adv-dc-${slot}`}
-                      value={llm?.checks?.[slot] ?? (slot === "second" ? "claude_cli" : "none")}
-                      onChange={(e) => setCheckSlot(slot, e.target.value)}
-                      title="Any model can sit in any check slot — coding-agent CLIs (subscription auth) or the API/local providers"
-                    >
-                      <option value="none">none</option>
-                      {(llm?.options ?? [])
-                        .filter((o) => o.provider !== "none")
-                        .map((o) => (
-                          <option key={o.provider} value={o.provider}>{o.label}</option>
-                        ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="adv-rescan adv-gear-btn adv-dc-btn"
-                      onClick={() => doubleCheck(slot)}
-                      disabled={
-                        dcBusy !== null || loading ||
-                        (llm?.checks?.[slot] ?? (slot === "second" ? "claude_cli" : "none")) === "none"
-                      }
-                      title="Reviews the picks against the exact briefing the advisor saw. CLI models need their tool installed and logged in; strong models at high effort can take minutes."
-                    >
-                      {dcBusy === slot
-                        ? "checking…"
-                        : advice.doublechecks?.[slot] ? "re-run" : "run"}
-                    </button>
-                  </span>
-                ))}
+                {(["second", "third"] as const).map((slot) => {
+                  const prov = llm?.checks?.[slot] ?? (slot === "second" ? "claude_cli" : "none");
+                  return (
+                    <span key={slot} className="adv-dc-slot">
+                      <label htmlFor={`adv-dc-${slot}`}>
+                        {slot === "second" ? "2nd" : "3rd"}
+                      </label>
+                      <select
+                        id={`adv-dc-${slot}`}
+                        value={prov}
+                        onChange={(e) => setCheckSlot(slot, e.target.value)}
+                        title="Any model can sit in any check slot — coding-agent CLIs (subscription auth) or the API/local providers"
+                      >
+                        <option value="none">none</option>
+                        {(llm?.options ?? [])
+                          .filter((o) => o.provider !== "none")
+                          .map((o) => (
+                            <option key={o.provider} value={o.provider}>{o.label}</option>
+                          ))}
+                      </select>
+                      {isCli(prov) && prov !== llm?.active.provider && cliPicker(prov)}
+                      <button
+                        type="button"
+                        className="adv-rescan adv-gear-btn adv-dc-btn"
+                        onClick={() => doubleCheck(slot)}
+                        disabled={dcBusy !== null || loading || prov === "none"}
+                        title="Reviews the picks against the exact briefing the advisor saw. CLI models need their tool installed and logged in; strong models at high effort can take minutes."
+                      >
+                        {dcBusy === slot
+                          ? "checking…"
+                          : advice.doublechecks?.[slot] ? "re-run" : "run"}
+                      </button>
+                    </span>
+                  );
+                })}
+                <label className="adv-dc-debug-toggle" title="Show the full chain: which model produced the counsel, what each check said, and where they disagree">
+                  <input type="checkbox" checked={dcDebug} onChange={toggleDcDebug} />
+                  chain detail
+                </label>
               </div>
               {dcBusy && (
                 <div className="adv-gear-loading" role="status" aria-live="polite">
@@ -702,6 +870,116 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                   </div>
                 );
               })}
+              {dcDebug && (
+                <div className="adv-dc-trail">
+                  <div className="adv-sub">Chain detail — who said what</div>
+                  <table className="adv-table">
+                    <tbody>
+                      <tr>
+                        <td className="adv-dc-stage">primary</td>
+                        <td>
+                          {advice.source === "llm"
+                            ? `${advice.llm?.provider ?? "?"} · ${advice.llm?.model ?? "?"}`
+                            : "deterministic (builtin advisor" +
+                              (advice.llm && advice.llm.provider !== "none"
+                                ? ` — ${advice.llm.provider} was configured but unavailable)`
+                                : ")")}
+                        </td>
+                        <td className="adv-why">
+                          {advice.loadout.length} loadout picks ·{" "}
+                          {advice.aa_now.length + advice.aa_save.length} AA recs ·{" "}
+                          {advice.locations.length} zones ·{" "}
+                          {advice.generated?.replace("T", " ")}
+                        </td>
+                      </tr>
+                      {(["second", "third"] as const).map((slot) => {
+                        const dc = advice.doublechecks?.[slot];
+                        if (!dc) return null;
+                        const majors = dc.issues.filter((i) => i.severity === "major").length;
+                        return (
+                          <tr key={slot}>
+                            <td className="adv-dc-stage">
+                              {slot === "second" ? "2nd check" : "3rd check"}
+                            </td>
+                            <td>
+                              {dc.provider} · {dc.model}
+                              {dc.effort ? ` (${dc.effort})` : ""}
+                            </td>
+                            <td className="adv-why">
+                              <span className="adv-dc-verdict" data-v={dc.verdict}>
+                                {dc.verdict.replace("_", " ")}
+                              </span>{" "}
+                              {dc.issues.length} issue{dc.issues.length === 1 ? "" : "s"}
+                              {majors > 0 && ` (${majors} major)`}
+                              {slot === "third" && dc.prior_agreement && (
+                                <>
+                                  {" · "}
+                                  <span className="adv-dc-agree" data-a={dc.prior_agreement}>
+                                    {AGREEMENT_TEXT[dc.prior_agreement]}
+                                  </span>
+                                  {dc.prior_notes && (
+                                    <span className="adv-cls"> — {dc.prior_notes}</span>
+                                  )}
+                                </>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {issueMatrix(advice.doublechecks?.second, advice.doublechecks?.third)
+                    .length > 0 && (
+                    <>
+                      <div className="adv-sub" style={{ marginTop: 8 }}>
+                        Where the checks overlap and split
+                      </div>
+                      <table className="adv-table">
+                        <thead>
+                          <tr>
+                            <th>item</th>
+                            <th>2nd</th>
+                            <th>3rd</th>
+                            <th>reading</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {issueMatrix(
+                            advice.doublechecks?.second,
+                            advice.doublechecks?.third,
+                          ).map((r) => (
+                            <tr key={r.item}>
+                              <td><strong>{r.item}</strong></td>
+                              <td>
+                                {r.second ? (
+                                  <span className="adv-dc-sev" data-sev={r.second}>
+                                    {r.second}
+                                  </span>
+                                ) : "—"}
+                              </td>
+                              <td>
+                                {r.third ? (
+                                  <span className="adv-dc-sev" data-sev={r.third}>
+                                    {r.third}
+                                  </span>
+                                ) : "—"}
+                              </td>
+                              <td className="adv-why" data-dim={r.split || undefined}>
+                                {r.stance}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <p className="adv-dc-endorse">
+                        A dash means that check ran and did not raise the item —
+                        an implicit vote of confidence, not missing data. Items
+                        both checks flag deserve the most attention.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             {advice.loadout.length + advice.nice_to_have.length > 0 && (

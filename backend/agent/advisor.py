@@ -986,6 +986,11 @@ async def generate_advice(ctx: dict) -> dict:
     book = ctx.get("spellbook")
     base = {
         "generated": datetime.now().isoformat(timespec="seconds"),
+        # who produced this counsel — the chain-detail view names each
+        # stage (primary/2nd/3rd), so the primary must be on record too.
+        # `source` still says whether the LLM path actually ran; on a
+        # fallback this records what was CONFIGURED, source says builtin.
+        "llm": llm_active(),
         "context": {
             "classes": ctx.get("class_str"), "level": ctx.get("level"),
             "playstyle": ctx.get("playstyle"), "zone": ctx.get("zone"),
