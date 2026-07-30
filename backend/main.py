@@ -1188,7 +1188,7 @@ async def api_settings_get():
     from backend import spell_lines
     from backend.game_data import _vendored_zem
     from backend.llm_runtime import (active, available, custom_model,
-                                     openai_model)
+                                     effort_for, model_for, openai_model)
     from backend.secrets_store import which_are_set
     return {
         "game": _describe_game_dir(settings.eql_game_dir),
@@ -1204,10 +1204,14 @@ async def api_settings_get():
             "ollama_base_url": settings.ollama_base_url,
             "ollama_model": settings.ollama_model,
             "anthropic_model": settings.anthropic_model,
-            "claude_cli_model": settings.claude_cli_model,
-            "codex_cli_model": settings.codex_cli_model,
-            "claude_cli_effort": settings.claude_cli_effort,
-            "codex_cli_effort": settings.codex_cli_effort,
+            # EFFECTIVE values (runtime choice wins over .env), not raw
+            # settings: the panel seeds its fields from these, and seeding
+            # from the .env layer meant opening Settings and pressing Save
+            # silently reset a runtime effort choice back to the default
+            "claude_cli_model": model_for("claude_cli"),
+            "codex_cli_model": model_for("codex_cli"),
+            "claude_cli_effort": effort_for("claude_cli"),
+            "codex_cli_effort": effort_for("codex_cli"),
             "keys_set": which_are_set(),
             "available": available(),
         },
