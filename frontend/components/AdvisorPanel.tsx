@@ -278,6 +278,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [dcError, setDcError] = useState<string | null>(null);
   const [gearDcBusy, setGearDcBusy] = useState<"second" | "third" | null>(null);
   const [gearDcError, setGearDcError] = useState<string | null>(null);
+  const [revBusy, setRevBusy] = useState(false);
   const [dcDebug, setDcDebug] = useState(false);
   const [cliDraft, setCliDraft] = useState<
     Record<string, { model: string; effort: string }>
@@ -582,6 +583,23 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     }
   };
 
+  // Close the loop: feed the stored check findings back through the
+  // counsel model; the revision re-passes every deterministic gate
+  // server-side before it replaces the display. Failures keep the
+  // original counsel untouched.
+  const reviseCounsel = async () => {
+    setRevBusy(true);
+    setDcError(null);
+    try {
+      const r = await apiSend<Advice>("/api/advisor/revise", {});
+      setAdvice(r);
+    } catch (e) {
+      setDcError(unwrapApiError(e));
+    } finally {
+      setRevBusy(false);
+    }
+  };
+
   // Same check slots, gear-shaped rubric: the reviewer sees the whole
   // slot table at once, which is exactly the joint-assignment view the
   // per-row consult lacks about its own output.
@@ -855,6 +873,25 @@ export const AdvisorPanel = memo(function AdvisorPanel({
             )}
             {advice.note && <div className="adv-note">{advice.note}</div>}
 
+            {advice.revision && (
+              <div className="adv-note">
+                <strong>Revised counsel</strong> — {advice.revision.model} applied
+                the {advice.revision.reviews?.third ? "2nd + 3rd checks'" : "2nd check's"}{" "}
+                findings and re-passed every verification gate
+                {advice.revision.notes ? <>: {advice.revision.notes}</> : "."}
+                {advice.revision.declined.length > 0 && (
+                  <ul className="adv-list" style={{ marginTop: 6 }}>
+                    {advice.revision.declined.map((d) => (
+                      <li key={d.item} data-dim>
+                        <span className="adv-cls">declined:</span>{" "}
+                        <strong>{d.item}</strong> — {d.reason}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
             <div className="adv-dc">
               <div className="adv-dc-bar">
                 <span className="adv-dc-title">
@@ -901,7 +938,25 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                   <input type="checkbox" checked={dcDebug} onChange={toggleDcDebug} />
                   chain detail
                 </label>
+                {(advice.doublechecks?.second || advice.doublechecks?.third) && (
+                  <button
+                    type="button"
+                    className="adv-rescan adv-gear-btn adv-dc-btn"
+                    onClick={reviseCounsel}
+                    disabled={revBusy || dcBusy !== null || loading}
+                    title="Feed these findings back through your counsel model for a revised counsel — the revision re-passes every verification gate before it replaces this one, and the checks reset so you can review the revision fresh"
+                  >
+                    {revBusy ? "revising…" : "revise counsel with findings"}
+                  </button>
+                )}
               </div>
+              {revBusy && (
+                <div className="adv-gear-loading" role="status" aria-live="polite">
+                  <span className="adv-gear-spin" aria-hidden />
+                  Revising — the counsel model is applying the check findings,
+                  then every gate re-runs… (can take minutes)
+                </div>
+              )}
               {dcBusy && (
                 <div className="adv-gear-loading" role="status" aria-live="polite">
                   <span className="adv-gear-spin" aria-hidden />

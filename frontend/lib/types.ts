@@ -472,6 +472,18 @@ export interface Advice {
    *  important first. The written spell set sinks these to the FINAL
    *  gems (SA scans from the last gem backwards, one song per rank). */
   sa_songs?: string[];
+  /** Present when this counsel is a REVISION: the check findings were fed
+   *  back through the counsel model and the result re-passed every gate.
+   *  `reviews` are the checks that prompted it (doublechecks reset so new
+   *  checks review the revision). */
+  revision?: {
+    notes: string | null;
+    declined: { item: string; reason: string }[];
+    reviews?: { second?: DoubleCheck; third?: DoubleCheck };
+    provider: string;
+    model: string;
+    generated: string;
+  };
   source: "llm" | "builtin";
   grounding: "wiki" | "memory";
   generated: string;

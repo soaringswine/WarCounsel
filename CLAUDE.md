@@ -442,6 +442,13 @@ throttled `state` pushes. REST highlights (see main.py for all):
   provider (any, or "none") to each slot; `POST /api/llm/cli` sets a CLI
   provider's model/effort WITHOUT switching the active provider (clears
   consult caches only when the edited provider IS active).
+  `POST /api/advisor/revise` closes the loop: briefing + counsel + the
+  stored findings go back through the ACTIVE counsel model, and the
+  revised reply re-enters EVERY gate via generate_advice(reply_json=...)
+  — a revision can never bypass what a consult cannot; failures keep
+  the original counsel, successes replace it with provenance (notes,
+  declined findings, the prompting reviews) and reset doublechecks so
+  fresh checks review the revision.
   `POST /api/gear/doublecheck {slot}` is the gear twin: same check
   slots, gear-shaped rubric that reviews the slot table JOINTLY —
   assignment-across-slots waste (shield parked in a hand while a

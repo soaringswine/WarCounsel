@@ -1311,6 +1311,38 @@ async def api_hunting(level: int | None = None):
     return {"level": int(lv), "zones": zones}
 
 
+def _advisor_ctx(book=None) -> dict:
+    """The advisor consult context from live tracker state + exports.
+    Shared by the consult route and the revise-with-findings route, so a
+    revision is gated against the same live state a consult would see."""
+    if book is None:
+        book = load_spellbook(tracker.name, tracker.server)
+    ctx = {
+        "name": tracker.name, "race": tracker.race,
+        "class_str": tracker.class_str, "level": tracker.level,
+        "playstyle": tracker.playstyle, "zone": tracker.zone,
+        "aa_available": tracker.aa_available, "spell_slots": tracker.spell_slots,
+        "recent_activity": tracker.recent_activity_summary(),
+        "recent_casts": tracker.recent_casts(),
+        "spellbook": book,
+        "owned_aas": tracker.owned_aas,
+    }
+    inv = load_export(tracker.name, tracker.server, "Inventory")
+    if inv and inv.get("worn"):
+        ctx["inventory_worn"] = inv["worn"]
+    miss = load_export(tracker.name, tracker.server, "MissingSpells")
+    if miss and tracker.level:
+        # Sort by level DESCENDING before the cap. Ascending kept the 25
+        # LOWEST, which for anyone with a backlog of skipped low-level
+        # spells meant the cap fell below their own level and the vendor
+        # list came out empty -- silently, since an empty list just hides
+        # the section. Near-level spells are the ones worth buying.
+        ctx["missing_spells"] = sorted(
+            (s for s in miss["castable"] if s["level"] <= tracker.level + 3),
+            key=lambda s: -s["level"])[:25]
+    return ctx
+
+
 @app.get("/api/advisor")
 async def get_advisor(refresh: bool = False, cached: bool = False):
     """Structured counsel: spells, AA spending, horizon, zone picks.
@@ -1336,29 +1368,7 @@ async def get_advisor(refresh: bool = False, cached: bool = False):
         if _advice_cache is not None:
             return {**_advice_cache, "stale": True}
         return {"cached": False}
-    ctx = {
-        "name": tracker.name, "race": tracker.race,
-        "class_str": tracker.class_str, "level": tracker.level,
-        "playstyle": tracker.playstyle, "zone": tracker.zone,
-        "aa_available": tracker.aa_available, "spell_slots": tracker.spell_slots,
-        "recent_activity": tracker.recent_activity_summary(),
-        "recent_casts": tracker.recent_casts(),
-        "spellbook": book,
-        "owned_aas": tracker.owned_aas,
-    }
-    inv = load_export(tracker.name, tracker.server, "Inventory")
-    if inv and inv.get("worn"):
-        ctx["inventory_worn"] = inv["worn"]
-    miss = load_export(tracker.name, tracker.server, "MissingSpells")
-    if miss and tracker.level:
-        # Sort by level DESCENDING before the cap. Ascending kept the 25
-        # LOWEST, which for anyone with a backlog of skipped low-level
-        # spells meant the cap fell below their own level and the vendor
-        # list came out empty -- silently, since an empty list just hides
-        # the section. Near-level spells are the ones worth buying.
-        ctx["missing_spells"] = sorted(
-            (s for s in miss["castable"] if s["level"] <= tracker.level + 3),
-            key=lambda s: -s["level"])[:25]
+    ctx = _advisor_ctx(book)
     advice = await generate_advice(ctx)
     # deterministic vendor list: missing spells are buyable (and scribable)
     # BEFORE their level — compact reminder, not LLM-generated
@@ -1424,6 +1434,66 @@ async def advisor_doublecheck(body: dict | None = None):
     _advice_cache = {**_advice_cache, "doublechecks": reviews}
     _save_advice_cache()
     return review
+
+
+@app.post("/api/advisor/revise")
+async def advisor_revise():
+    """Close the check loop: send the briefing + current counsel + the
+    stored check findings back through the ACTIVE counsel model for a
+    revised reply, which re-enters EVERY deterministic gate via
+    generate_advice(reply_json=...) — a revision can never bypass what a
+    consult cannot. On success the revision replaces the counsel with
+    provenance attached (notes, declined findings, the reviews that
+    prompted it) and doublechecks reset, so fresh checks review the
+    REVISED counsel. Any failure keeps the original counsel untouched."""
+    global _advice_cache
+    if _advice_cache is None or not _advice_cache.get("_prompt"):
+        raise HTTPException(409, "No counsel with a stored briefing — "
+                                 "press Consult first.")
+    reviews = _advice_cache.get("doublechecks") or {}
+    if not reviews:
+        raise HTTPException(409, "No check findings to revise with — run "
+                                 "a 2nd (or 3rd) check first.")
+    from backend.llm_runtime import active, model_for
+    prov = active()["provider"]
+    if prov == "none":
+        raise HTTPException(409, "Revision needs a model — pick one in "
+                                 "the Counsel selector.")
+    from backend.agent.doublecheck import run_revision
+    data, err = await run_revision(_advice_cache["_prompt"], _advice_cache,
+                                   reviews, prov)
+    if err:
+        raise HTTPException(502, f"revision failed: {err}")
+    revision_meta = {
+        "notes": (str(data.pop("revision_notes", "") or "").strip()[:600]
+                  or None),
+        "declined": [
+            {"item": str(d.get("item") or "")[:120],
+             "reason": str(d.get("reason") or "")[:300]}
+            for d in (data.pop("declined_findings", None) or [])
+            if isinstance(d, dict) and d.get("item")][:8],
+        "reviews": reviews,
+        "provider": prov, "model": model_for(prov),
+        "generated": datetime.now().isoformat(timespec="seconds"),
+    }
+    ctx = _advisor_ctx()
+    revised = await generate_advice(ctx, reply_json=data,
+                                    briefing=_advice_cache["_prompt"])
+    if revised.get("source") != "llm":
+        # the revision reply failed gating — never trade good counsel for
+        # a builtin fallback the user did not ask for
+        raise HTTPException(502, "the revised counsel failed the "
+                                 "verification gates — keeping the "
+                                 "original.")
+    # deterministic extras carry over: the vendor list came from the same
+    # context, and grounding describes the original wiki fetch
+    revised["purchase"] = _advice_cache.get("purchase")
+    revised["grounding"] = _advice_cache.get("grounding",
+                                             revised.get("grounding"))
+    revised["revision"] = revision_meta
+    _advice_cache = revised
+    _save_advice_cache()
+    return revised
 
 
 @app.get("/api/gear")

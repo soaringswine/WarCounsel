@@ -222,20 +222,79 @@ def _error(msg: str) -> dict:
     return {"error": msg}
 
 
-async def _ask(provider: str, prompt: str) -> tuple:
+async def _ask(provider: str, prompt: str,
+               system: Optional[str] = SYSTEM_PROMPT) -> tuple:
     """(reply text, meta) from the given provider — CLI subprocess or the
-    runtime's chat model. Raises with a user-showable message."""
+    runtime's chat model. Raises with a user-showable message. `system`
+    defaults to the reviewer role; the revision flow passes None because
+    a reviser is the ADVISOR again, not a critic."""
     if provider in cli_llm.PROVIDERS:
-        return await cli_llm.arun(provider, prompt, system=SYSTEM_PROMPT,
+        return await cli_llm.arun(provider, prompt, system=system,
                                   model=model_for(provider),
                                   effort=effort_for(provider))
     # API/local providers reuse the same seam the advisor consults through
     from langchain_core.messages import HumanMessage, SystemMessage
     from backend.agent.advisor import _reply_text
     llm = get_llm(provider)
-    response = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT),
-                                  HumanMessage(content=prompt)])
+    msgs = ([SystemMessage(content=system)] if system else []) + \
+           [HumanMessage(content=prompt)]
+    response = await llm.ainvoke(msgs)
     return _reply_text(response), {}
+
+
+def build_revision_prompt(briefing: str, advice: dict, reviews: dict) -> str:
+    """The revise-with-findings prompt: the ORIGINAL briefing (schema and
+    rules included), the counsel as displayed, and the check findings.
+    The reviser answers in the SAME schema — its reply re-enters every
+    deterministic gate via generate_advice(reply_json=...)."""
+    counsel = json.dumps(_public_advice(advice), indent=1, ensure_ascii=False)
+    finds = []
+    for slot in ("second", "third"):
+        r = reviews.get(slot)
+        if not r:
+            continue
+        keep = {k: r.get(k) for k in
+                ("provider", "model", "verdict", "summary", "issues")}
+        finds.append(f"--- {slot} check ---\n"
+                     + json.dumps(keep, indent=1, ensure_ascii=False))
+    return "\n".join([
+        "=== YOUR ORIGINAL BRIEFING (data, rules, and the EXACT reply "
+        "schema — all still binding) ===",
+        briefing,
+        "",
+        "=== YOUR PREVIOUS COUNSEL (as shown to the player) ===",
+        counsel,
+        "",
+        "=== INDEPENDENT REVIEW FINDINGS ===",
+        "\n".join(finds),
+        "",
+        "=== YOUR TASK ===",
+        "Produce a REVISED counsel. Apply each finding you can "
+        "independently verify against the briefing; decline the rest. "
+        "Keep everything a finding does not touch STABLE — do not "
+        "reshuffle unrelated picks. Reply with ONLY a JSON object in "
+        "EXACTLY the briefing's schema, plus two extra keys:",
+        '  "revision_notes": "2-4 sentences: what you changed and why",',
+        '  "declined_findings": [{"item": "...", "reason": "why this '
+        'finding was not applied"}]',
+    ])
+
+
+async def run_revision(briefing: str, advice: dict, reviews: dict,
+                       provider: str) -> tuple:
+    """(parsed revision dict, error) — the caller gates the dict through
+    generate_advice(reply_json=...); this only asks and parses."""
+    prompt = build_revision_prompt(briefing, advice, reviews)
+    try:
+        text, _meta = await _ask(provider, prompt, system=None)
+    except Exception as e:
+        return None, str(e)[:400]
+    from backend.agent.advisor import _extract_json
+    data = _extract_json(text)
+    if not data:
+        return None, (f"the revision reply carried no JSON "
+                      f"({len(text)} chars of text seen)")
+    return data, None
 
 
 async def run_doublecheck(briefing: str, advice: dict, provider: str,

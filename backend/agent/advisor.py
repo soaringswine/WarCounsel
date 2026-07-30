@@ -1147,7 +1147,16 @@ def _gate_aas(items: List[dict], owned: dict, meta: dict) -> List[dict]:
     return out
 
 
-async def generate_advice(ctx: dict) -> dict:
+async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
+                          briefing: Optional[str] = None) -> dict:
+    """Consult, or — when `reply_json` is given — GATE A REVISION: a reply
+    produced elsewhere (the revise-with-findings flow) skips the prompt/LLM
+    steps and re-enters the exact same machine-verification gates as a
+    fresh consult, so a revision can never bypass what a consult cannot.
+    `briefing` keeps the ORIGINAL prompt attached so later checks still
+    review against the same data. A revision that fails gating falls to
+    the builtin body; callers detect that via source != "llm" and keep
+    the previous counsel instead."""
     classes = [c.strip() for c in (ctx.get("class_str") or "").split("/") if c.strip()]
     book = ctx.get("spellbook")
     base = {
@@ -1176,7 +1185,7 @@ async def generate_advice(ctx: dict) -> dict:
         except Exception:
             ctx["_hunting"] = []
         ctx["_permanent"] = _permanent_buffs(ctx)
-        if llm_active()["provider"] == "none":
+        if reply_json is None and llm_active()["provider"] == "none":
             body = await _builtin_counsel(ctx)
             base["grounding"] = body.pop("grounding", "memory")
             body["sa_songs"] = _sa_songs(
@@ -1188,54 +1197,62 @@ async def generate_advice(ctx: dict) -> dict:
             # deterministic advisor reasoned from.
             base["_prompt"] = _build_prompt(ctx, "")
             return {**base, **body}
-        wiki = await build_wiki_context(
-            classes, ctx.get("level"),
-            max_chars=12_000 if ctx.get("spellbook") else 20_000)
+        if reply_json is None:
+            wiki = await build_wiki_context(
+                classes, ctx.get("level"),
+                max_chars=12_000 if ctx.get("spellbook") else 20_000)
     except Exception:
         logger.exception("Wiki context failed; advising ungrounded")
     base["grounding"] = "wiki" if wiki else "memory"
 
     try:
-        # Thinking models burn a large reasoning budget BEFORE emitting the
-        # answer (gemma ~4-5k reasoning tokens here) and it counts against
-        # completion tokens — so size everything to the LOADED context.
-        prompt = _build_prompt(ctx, wiki)
-        budget = await asyncio.to_thread(_lmstudio_budget, len(prompt))
-        if budget and budget < 3000:
-            # context too small for the full prompt + thinking: shrink wiki
-            wiki = wiki[:5000]
+        if reply_json is not None:
+            # revision path: the reply was produced against the ORIGINAL
+            # briefing (plus review findings) — no new prompt, same gates
+            data = reply_json
+            base["_prompt"] = briefing or _build_prompt(ctx, "")
+        else:
+            # Thinking models burn a large reasoning budget BEFORE emitting
+            # the answer (gemma ~4-5k reasoning tokens here) and it counts
+            # against completion tokens — size everything to the LOADED
+            # context.
             prompt = _build_prompt(ctx, wiki)
             budget = await asyncio.to_thread(_lmstudio_budget, len(prompt))
-        # the briefing actually sent, kept (and cached) so a double-check
-        # can review the counsel against the same data the advisor saw
-        base["_prompt"] = prompt
-        llm = get_llm()
-        bound = llm
-        if budget:
-            try:
-                bound = llm.bind(max_tokens=budget)
-            except Exception:
-                pass
-        try:
-            response = await bound.ainvoke([HumanMessage(content=prompt)])
-        except Exception as first_err:
-            # whatever slipped through: retry once, half the prompt + budget
-            logger.warning("Advisor first attempt failed (%.80s); retrying "
-                           "smaller", str(first_err))
-            prompt = _build_prompt(ctx, wiki[:4000])
+            if budget and budget < 3000:
+                # context too small for the full prompt + thinking: shrink
+                wiki = wiki[:5000]
+                prompt = _build_prompt(ctx, wiki)
+                budget = await asyncio.to_thread(_lmstudio_budget, len(prompt))
+            # the briefing actually sent, kept (and cached) so a double-check
+            # can review the counsel against the same data the advisor saw
             base["_prompt"] = prompt
+            llm = get_llm()
+            bound = llm
             if budget:
                 try:
-                    bound = llm.bind(max_tokens=max(1200, budget // 2))
+                    bound = llm.bind(max_tokens=budget)
                 except Exception:
                     pass
-            response = await bound.ainvoke([HumanMessage(content=prompt)])
-        raw = _reply_text(response)
-        data = _extract_json(raw)
-        if not data:
-            raise ValueError(
-                "no JSON object in LLM reply "
-                f"({len(raw)} chars of text seen)")
+            try:
+                response = await bound.ainvoke([HumanMessage(content=prompt)])
+            except Exception as first_err:
+                # whatever slipped through: retry once, smaller
+                logger.warning("Advisor first attempt failed (%.80s); "
+                               "retrying smaller", str(first_err))
+                prompt = _build_prompt(ctx, wiki[:4000])
+                base["_prompt"] = prompt
+                if budget:
+                    try:
+                        bound = llm.bind(max_tokens=max(1200, budget // 2))
+                    except Exception:
+                        pass
+                response = await bound.ainvoke([HumanMessage(content=prompt)])
+            raw = _reply_text(response)
+            data = _extract_json(raw)
+            if not data:
+                raise ValueError(
+                    "no JSON object in LLM reply "
+                    f"({len(raw)} chars of text seen)")
         solo = (ctx.get("playstyle") or "").startswith("solo")
         usable = ([s["name"] for s in book["castable"]
                    if s["level"] <= ctx["level"]]
