@@ -135,6 +135,32 @@ def build_review_prompt(briefing: str, advice: dict,
         counsel,
         "",
     ]
+    if kind == "advisor":
+        # The pick lists above are PRIORITY order, not gem order — the app
+        # writes the in-game set deterministically. Without the ACTUAL
+        # order here, a checker reconstructs gem positions from list
+        # positions and flags Symphonic Aura problems the writer already
+        # prevents (live false positive: "SA would capture Selo's").
+        try:
+            from backend.agent.advisor import stack_gem_order
+            names = [str(p.get("name")) for p in
+                     (advice.get("must_have") or [])
+                     + (advice.get("should_have") or []) if p.get("name")]
+            if names:
+                order = stack_gem_order(
+                    names, [str(s) for s in (advice.get("sa_songs") or [])])
+                parts += [
+                    "=== WRITTEN SPELL-SET GEM ORDER (deterministic — this "
+                    "is what 'write in-game spell set' actually produces; "
+                    "judge Symphonic Aura behavior against THIS, never "
+                    "against the pick lists' display order. A user-selected "
+                    "subset re-stacks by the same rules.) ===",
+                    "\n".join(f"gem {i}: {n}"
+                              for i, n in enumerate(order, 1)),
+                    "",
+                ]
+        except Exception:
+            pass  # review still works without the order section
     if prior:
         keep = {k: prior.get(k) for k in
                 ("verdict", "summary", "issues", "endorsements")}
