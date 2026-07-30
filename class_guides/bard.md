@@ -5,6 +5,12 @@ Baseline distilled from the eqlwiki.com class page (2026-07-21). Replace/extend 
 - Role: jack-of-all-trades support — stacked songs give haste, run
   speed, resists, regen, mana song (stacks with Clarity), plus slows,
   lull, mez, charm (Solon`s Bewitching Bravura L39).
+- Instrument EXALTATION stones (Hand Drum, Lute, ...): the song modifier
+  is active while the host item is worn in Primary, Secondary, or an Any
+  Slot, and off when the host is unequipped (player-tested with Selo`s,
+  2026-07-29; armor-slot hosts untested). The stone, not the held item,
+  carries the modifier — so any statted weapon with an empty focus
+  socket can be the carrier.
 - Symphonic Aura AA (free, L1): auto-pulses qualifying songs (no mana,
   no cooldown, non-targeted) in the background; with /melody, ~9
   concurrent songs are practical.

@@ -1436,7 +1436,7 @@ __CONTEXT__
 OWNED EQUIPMENT (from /outputfile inventory; [worn/bags/bank] shows where each lives; stats and drop sources are from the game's wiki):
 __GEAR__
 
-EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. A stone carries its source item's CLASS restriction (host classes shrink to the overlap). The wiki also claims equip-SLOT restrictions transfer, but live play contradicts that for focus stones (a SECONDARY-sourced instrument stone hosted by a Primary-worn weapon, accepted by the game) — so NEVER claim a socketed stone "gives nothing" based on the host's slot; if slot-dependence would change your recommendation, say it is unverified and suggest a one-time in-game check instead. A statless item hosting a stone is often a deliberate carrier, not filler. Each socketed stone's line below states where it can LEGALLY move (machine-checked: empty socket of its type — sockets unlock by merge rank, an unmerged item has none — plus class overlap plus slot compatibility): when it says NO legal empty socket exists, the stone cannot follow any winner — count it fully toward its host's value, and if you still recommend unseating that host, say plainly the effect is lost until a socket opens. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
+EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. A stone carries its source item's CLASS restriction (host classes shrink to the overlap). The wiki also claims equip-SLOT restrictions transfer, but live play disproved that for focus stones: an instrument stone's modifier was PLAYER-VERIFIED (Selo's test) active with its host worn in Primary, Secondary, or an Any Slot, and off only when the host is unequipped — NEVER claim a socketed stone "gives nothing" based on the host's hand slot. Armor-slot hosts remain untested; only there may you suggest a one-time in-game check. A statless item hosting a stone is often a deliberate carrier, not filler. Each socketed stone's line below states where it can LEGALLY move (machine-checked: empty socket of its type — sockets unlock by merge rank, an unmerged item has none — plus class overlap plus slot compatibility): when it says NO legal empty socket exists, the stone cannot follow any winner — count it fully toward its host's value, and if you still recommend unseating that host, say plainly the effect is lost until a socket opens. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
 __EXALTS__
 
 __PET_BLOCK__
@@ -1877,16 +1877,17 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
                     kind = _instrument_kind(bname, full_line)
                     eff = (f"Bard instrument ({kind}) — its {kind} song "
                            "modifier applies while the stone sits in "
-                           "equipped gear; real value for a Bard. Live "
-                           "play confirms such stones socket into and stay "
-                           "equipped in ANY hand slot (a drum stone in a "
-                           "Primary-worn weapon is fine) — NEVER claim the "
+                           "equipped gear; real value for a Bard. "
+                           "PLAYER-VERIFIED (Selo's test, 2026-07-29): the "
+                           "modifier is ACTIVE with the host worn in "
+                           "Primary, Secondary, or an Any Slot, and OFF "
+                           "when the host is unequipped — NEVER claim the "
                            "stone 'gives nothing' because of its host's "
-                           "slot; whether the modifier is identical from "
-                           "every host slot is unverified, so at most "
-                           "suggest a one-time in-game check for a NEW "
-                           "host type. A statless item kept as a stone "
-                           "carrier is a DELIBERATE setup, not filler"
+                           "hand slot. Only ARMOR-slot hosts (Head/Chest/"
+                           "etc.) remain untested — suggest a one-time "
+                           "in-game check only for those. A statless item "
+                           "kept as a stone carrier is a DELIBERATE "
+                           "setup, not filler"
                            if kind else "no listed effect (stat stone?)")
                 usable = _trio_usable(full_line, classes)
         except Exception:

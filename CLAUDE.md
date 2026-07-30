@@ -793,9 +793,12 @@ whenever the Inventory parse changes.
     revision claiming the stone "gives nothing" in Primary. Current
     policy: export socket data (empty socket of the right type) wins;
     the shared-slot heuristic applies only to candidates with NO socket
-    data; class overlap stays binding; whether an effect works
-    identically from every host slot is UNVERIFIED and the prompts say
-    to suggest a one-time in-game check rather than assert.
+    data; class overlap stays binding. PLAYER-VERIFIED same day (Selo's
+    speed test, host scimitar moved Primary -> Secondary -> unequipped):
+    the instrument modifier is ACTIVE from Primary and Secondary hosts
+    and OFF when unequipped; Any Slot was already established by play.
+    Only ARMOR-slot hosts remain unverified — prompts allow a one-time
+    in-game check suggestion for those alone, never "gives nothing".
   - **Bard instruments are exaltations with NO wiki Effect line** — the
     item IS the effect (a song modifier). They used to fall through to
     "no listed effect (stat stone?)", the prompt valued them at zero, and
