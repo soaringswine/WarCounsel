@@ -678,6 +678,16 @@ whenever the Inventory parse changes.
 - The slot table ALWAYS shows the full 24-slot EQL roster (CANON_SLOTS):
   two generic **Any Slots** (any equippable item, stats live), paired
   Ear/Wrist/Fingers, Ammo, Held — **no Charm or Power Source in EQL**.
+- **Any Slot semantics: a parked weapon is NOT swung.** Worn stats (AC/
+  HP/attributes/resists/haste/socketed-exaltation effects) apply from an
+  Any Slot; weapon DMG and Delay contribute NOTHING there (community-
+  documented; the BACKSTAB stat is the known exception — it feeds a
+  Rogue's backstab from there). The prompt says so, and the builtin
+  path strips DMG/DELAY from BOTH sides of an Any Slot comparison — an
+  all-weapon vector honestly reduces to the same zero baseline as an
+  empty slot, which is what let a statless shield finally beat a
+  "DMG 7" spear whose damage was doing nothing. A model claiming Any
+  Slot weapon damage matters was the live bug that motivated this.
   Unaddressed slots backfill as keep/empty rows (`_full_slot_table`).
 - Wiki item stats are BASE (+0) values, and the eqlwiki Item Level
   slider's formula (ext.itemLevelSlider JS) is PORTED into game_data.py

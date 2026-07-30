@@ -738,6 +738,12 @@ async def _builtin_gear(ctx: dict) -> dict:
                              "where": "worn"})
             continue
         hand = {"primary": "mh", "secondary": "oh"}.get(base_slot)
+        # a parked item is not swung: weapon DMG/Delay contribute nothing
+        # from a generic slot (BACKSTAB is kept — community-documented to
+        # feed a Rogue's backstab from there), so both sides of an Any
+        # Slot comparison drop them. An all-weapon vector reduces to the
+        # same zero baseline as an empty slot — which is the truth.
+        is_any = base_slot == "any slot"
         if base_slot == "secondary":
             # a 2H weapon occupies BOTH hands. The LLM path already dropped
             # the secondary row behind a 2H primary; this path never did,
@@ -765,7 +771,10 @@ async def _builtin_gear(ctx: dict) -> dict:
                 continue  # STATS UNKNOWN worn item is never replaced
             cur_scaled = scale_item_line(cur_line, cr)
             cur_vec = item_stat_vector(cur_scaled)
-            if not cur_vec:
+            if is_any:
+                cur_vec.pop("DMG", None)
+                cur_vec.pop("DELAY", None)
+            if not cur_vec and not is_any:
                 continue
             cur_wi = _wpn_index(cur_scaled, lvl) if hand else None
             if hand and not cur_wi:
@@ -795,6 +804,9 @@ async def _builtin_gear(ctx: dict) -> dict:
                 continue
             scaled = scale_item_line(line, _item_rank(nm))
             vec = item_stat_vector(scaled)
+            if is_any:
+                vec.pop("DMG", None)
+                vec.pop("DELAY", None)
             if not vec:
                 continue
             if hand:
@@ -826,6 +838,10 @@ async def _builtin_gear(ctx: dict) -> dict:
             elif not cur:
                 why = ("fills an empty slot from gear you already own "
                        "(stats shown at its owned +N)")
+            elif is_any and not cur_vec:
+                why = ("the item parked here contributes nothing from a "
+                       "generic slot (weapon DMG/Delay do not apply in an "
+                       "Any Slot) — this adds real worn stats")
             else:
                 why = ("strictly better at its owned +N — every "
                        "listed stat equal or higher (wiki "
@@ -1247,7 +1263,7 @@ GEAR_PROMPT = """You are the equipment advisor inside an EverQuest Legends compa
 Recommend a TWO-HANDER for Primary ONLY when it beats the current primary AND secondary COMBINED — the off-hand goes empty — and say that comparison in the why.
 CRITICAL — upgrade ranks: each item's stats are ALREADY SCALED to the +N in its name, using the wiki's own item-level formula (primary stats gain ~10% of base per level, or +1/level when the base is <=10; DMG gains floor(base*N/10); items with 2+ stats gain an emergent "SV VOID: +N" resist). Compare the printed numbers DIRECTLY — a higher +N does NOT automatically win, and a strong +0 item can honestly beat a worn +2. Unowned drops you suggest in "farm" start at +0, so quote base values for those. Items marked STATS UNKNOWN have no data at all — NEVER invent their stats and NEVER recommend replacing them (you cannot make an honest comparison).
 
-Paired slots: "Ear 1"/"Ear 2", "Wrist 1"/"Wrist 2", "Fingers 1"/"Fingers 2", "Any Slot 1"/"Any Slot 2" hold TWO independent items each — treat each numbered slot separately and remember both currently-worn items of a pair are listed. The two "Any Slot"s are EQL's generic slots: ANY equippable item can sit there (weapons included) and its stats apply, so recommend the best owned items that don't fit elsewhere; also consider "Ammo" and "Held" if something owned is worth parking there.
+Paired slots: "Ear 1"/"Ear 2", "Wrist 1"/"Wrist 2", "Fingers 1"/"Fingers 2", "Any Slot 1"/"Any Slot 2" hold TWO independent items each — treat each numbered slot separately and remember both currently-worn items of a pair are listed. The two "Any Slot"s are EQL's generic slots: ANY equippable item can sit there and its WORN stats apply (AC, HP, attributes, resists, haste, socketed-exaltation effects). A weapon parked there is NOT swung: its DMG and Delay contribute NOTHING from an Any Slot — never justify an Any Slot pick by weapon damage or white-DPS index (known community-documented exception: a BACKSTAB-stat weapon still feeds a Rogue's backstab from there). Best Any Slot picks are statted items — shields for raw AC, spare armor — or deliberate exaltation carriers; a statless item there hosting a stone is a carrier, not dead weight. Also consider "Ammo" and "Held" if something owned is worth parking there.
 
 CHARACTER
 __CONTEXT__
