@@ -439,7 +439,9 @@ throttled `state` pushes. REST highlights (see main.py for all):
   slot on the current counsel: the slot's provider reviews it against the
   exact briefing the advisor saw; the third check also sees the second's
   review. Rides the advice cache. `POST /api/llm/checks` assigns a
-  provider (any, or "none") to each slot
+  provider (any, or "none") to each slot; `POST /api/llm/cli` sets a CLI
+  provider's model/effort WITHOUT switching the active provider (clears
+  consult caches only when the edited provider IS active)
 - `GET/POST /api/llm` — runtime model switch; clears both consult caches
 - `GET /api/hunting` — deterministic leveling-zone candidates (Gantt chart)
 - `GET /api/spellbook|aas|exports` · `POST /api/exports/refresh|aas/rescan`
@@ -626,7 +628,14 @@ display**; failing entries are dropped and logged, never shown. The gates
   `POST /api/advisor/doublecheck {slot}` replays the briefing plus the
   displayed counsel through the slot's provider; the THIRD check also
   sees the second's review and must agree or disagree from the briefing,
-  not echo it. The reply is shape-enforced; issues whose `item` matches
+  not echo it — its stance comes back STRUCTURED (`prior_agreement`:
+  agree|partial|disagree + `prior_notes`), which the Advisor tab's
+  "chain detail" toggle renders as a primary→2nd→3rd trail (each stage's
+  provider/model — the advice stamps `llm` at consult time — plus a
+  deterministic per-item matrix of where the two checks overlap and
+  split). CLI model/effort are runtime prefs (`effort_for`,
+  `set_cli_prefs` in llm_runtime); effort resolves at CALL time in
+  _CliChat because the chat-model cache keys on (provider, model) only. The reply is shape-enforced; issues whose `item` matches
   nothing displayed are ANNOTATED `unmatched` rather than dropped, because
   "the advisor failed to mention X" legitimately names un-advised things.
   Reviews ride `_advice_cache["doublechecks"]`, so they restore with the

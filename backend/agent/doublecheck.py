@@ -26,7 +26,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from backend import cli_llm
-from backend.llm_runtime import get_llm, model_for
+from backend.llm_runtime import effort_for, get_llm, model_for
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,13 @@ def build_review_prompt(briefing: str, advice: dict,
             "",
         ]
     parts.append(REVIEW_TASK)
+    if prior:
+        parts.append(
+            '\nBecause an earlier check exists, ALSO include these two keys '
+            'in your JSON object: "prior_agreement": "agree" | "partial" | '
+            '"disagree" (how your findings relate to the earlier check as a '
+            'whole) and "prior_notes": one short sentence naming the key '
+            'point you differ on, or null when you fully agree.')
     return "\n".join(parts)
 
 
@@ -154,9 +161,9 @@ async def _ask(provider: str, prompt: str) -> tuple:
     """(reply text, meta) from the given provider — CLI subprocess or the
     runtime's chat model. Raises with a user-showable message."""
     if provider in cli_llm.PROVIDERS:
-        model = model_for(provider)
         return await cli_llm.arun(provider, prompt, system=SYSTEM_PROMPT,
-                                  model=model)
+                                  model=model_for(provider),
+                                  effort=effort_for(provider))
     # API/local providers reuse the same seam the advisor consults through
     from langchain_core.messages import HumanMessage, SystemMessage
     from backend.agent.advisor import _reply_text
@@ -199,11 +206,22 @@ async def run_doublecheck(briefing: str, advice: dict, provider: str,
         verdict = "sound"
     elapsed = (datetime.now() - started).total_seconds()
     duration_ms = meta.get("duration_ms")
-    effort = (cli_llm.model_effort(provider)[1]
+    effort = (effort_for(provider)
               if provider in cli_llm.PROVIDERS else None)
+    # structured stance toward the earlier check — only meaningful when one
+    # was actually shown; a model volunteering it unprompted is discarded
+    agreement, agreement_notes = None, None
+    if prior:
+        pa = str(data.get("prior_agreement") or "").strip().lower()
+        agreement = pa if pa in ("agree", "partial", "disagree") else None
+        pn = data.get("prior_notes")
+        agreement_notes = (str(pn).strip()
+                           if pn not in (None, "", "null") else None)
     return {
         "slot": slot,
         "provider": provider,
+        "prior_agreement": agreement,
+        "prior_notes": agreement_notes,
         "verdict": verdict,
         "summary": (str(data.get("summary")).strip()
                     if data.get("summary") else None),

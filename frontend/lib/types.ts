@@ -440,6 +440,10 @@ export interface DoubleCheckIssue {
 export interface DoubleCheck {
   slot: "second" | "third";
   provider: string;
+  /** third check only, and only when a second check existed to compare
+   *  against: its structured stance toward that earlier review */
+  prior_agreement?: "agree" | "partial" | "disagree" | null;
+  prior_notes?: string | null;
   verdict: "sound" | "minor_issues" | "major_issues";
   summary: string | null;
   issues: DoubleCheckIssue[];
@@ -456,6 +460,9 @@ export interface Advice {
   stale?: boolean;
   purchase?: PurchaseItem[];
   doublechecks?: { second?: DoubleCheck; third?: DoubleCheck };
+  /** which provider/model was CONFIGURED when this counsel was produced —
+   *  `source` says whether the LLM path actually ran (vs builtin fallback) */
+  llm?: { provider: string; model: string };
   source: "llm" | "builtin";
   grounding: "wiki" | "memory";
   generated: string;
@@ -526,6 +533,8 @@ export interface LlmInfo {
   options?: LlmOption[];
   /** which provider sits in each check slot ("none" = slot disabled) */
   checks?: { second: string; third: string };
+  /** per-installed-CLI runtime prefs + the effort values that CLI accepts */
+  cli?: Record<string, { model: string; effort: string; efforts: string[] }>;
   openai_key_set: boolean;
 }
 

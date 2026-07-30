@@ -1056,14 +1056,19 @@ async def api_llm_get():
                         "label": f"Custom — {custom_model()}"})
     # coding-agent CLIs: offered only when the executable is actually
     # installed — a selector entry that can never work is a support ticket
+    from backend.llm_runtime import effort_for
+    cli = {}
     for p, installed in cli_llm.available().items():
         if installed:
             options.append({"provider": p, "model": model_for(p),
                             "label": f"{cli_llm.LABELS[p]} — {model_for(p)}"})
+            cli[p] = {"model": model_for(p), "effort": effort_for(p),
+                      "efforts": list(cli_llm.EFFORTS[p])}
     return {
         "active": active(),
         "options": options,
         "checks": checks(),
+        "cli": cli,
         "openai_key_set": bool(settings.openai_api_key),
     }
 
@@ -1101,6 +1106,37 @@ async def api_llm_set(body: dict):
     _gear_cache = None
     _save_advice_cache()
     return {"active": active(), "openai_key_set": bool(settings.openai_api_key)}
+
+
+@app.post("/api/llm/cli")
+async def api_llm_cli_set(body: dict):
+    """Set a CLI provider's model/effort WITHOUT switching the active
+    provider — the pickers next to a check slot must not steal primary.
+    Clears the consult caches only when the edited provider IS the active
+    one (its next consult would otherwise reuse counsel from the old
+    model); check results are never cleared — each records its model."""
+    from backend import cli_llm
+    from backend.llm_runtime import active, set_cli_prefs
+    provider = str(body.get("provider") or "").strip()
+    if provider not in cli_llm.PROVIDERS:
+        raise HTTPException(400, "provider must be "
+                                 + "|".join(cli_llm.PROVIDERS))
+    effort = body.get("effort")
+    if effort is not None:
+        effort = str(effort).strip().lower()
+        if effort and effort not in cli_llm.EFFORTS[provider]:
+            raise HTTPException(400, f"effort for {provider} must be "
+                                     + "|".join(cli_llm.EFFORTS[provider]))
+    model = body.get("model")
+    prefs = set_cli_prefs(provider,
+                          None if model is None else str(model),
+                          effort)
+    if active()["provider"] == provider:
+        global _advice_cache, _gear_cache
+        _advice_cache = None
+        _gear_cache = None
+        _save_advice_cache()
+    return {"provider": provider, **prefs}
 
 
 @app.post("/api/llm/checks")
@@ -1170,6 +1206,8 @@ async def api_settings_get():
             "anthropic_model": settings.anthropic_model,
             "claude_cli_model": settings.claude_cli_model,
             "codex_cli_model": settings.codex_cli_model,
+            "claude_cli_effort": settings.claude_cli_effort,
+            "codex_cli_effort": settings.codex_cli_effort,
             "keys_set": which_are_set(),
             "available": available(),
         },
@@ -1230,6 +1268,13 @@ async def api_settings_set(body: dict):
                    config_in.get("openai_model") or config_in.get("custom_model")
                    or config_in.get("claude_cli_model")
                    or config_in.get("codex_cli_model"))
+    # keep the runtime layer in step: llm_config wins over settings at use
+    # time, so an effort saved here must also land there or a stale runtime
+    # choice silently shadows it
+    from backend.llm_runtime import set_cli_prefs
+    for cli_p in ("claude_cli", "codex_cli"):
+        if f"{cli_p}_effort" in config_in:
+            set_cli_prefs(cli_p, effort=str(config_in[f"{cli_p}_effort"]))
         global _advice_cache, _gear_cache
         _advice_cache = None
         _gear_cache = None

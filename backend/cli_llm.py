@@ -40,6 +40,13 @@ PROVIDERS = ("claude_cli", "codex_cli")
 
 LABELS = {"claude_cli": "Claude Code CLI", "codex_cli": "Codex CLI"}
 
+# valid --effort / model_reasoning_effort values per CLI (claude 2.1.220,
+# codex-cli 0.146) — the /api/llm/cli endpoint validates against these
+EFFORTS = {
+    "claude_cli": ("low", "medium", "high", "xhigh", "max"),
+    "codex_cli": ("minimal", "low", "medium", "high", "xhigh"),
+}
+
 
 def _setting_exe(provider: str) -> str:
     return settings.claude_cli if provider == "claude_cli" else settings.codex_cli
@@ -177,21 +184,24 @@ def _run_codex(exe: str, prompt: str, system: Optional[str],
 
 
 def run(provider: str, prompt: str, system: Optional[str] = None,
-        model: Optional[str] = None) -> Tuple[str, dict]:
+        model: Optional[str] = None,
+        effort: Optional[str] = None) -> Tuple[str, dict]:
     """One blocking CLI run -> (answer text, meta). Raises RuntimeError with
     a user-showable message on any failure; callers decide fallback.
 
-    `model` overrides the .env default (llm_runtime persists a per-provider
-    choice made in the UI); "default" is the codex display placeholder for
-    "no -m flag — whatever codex itself is configured with"."""
+    `model`/`effort` override the .env defaults (llm_runtime persists
+    per-provider choices made in the UI); "default" is the codex display
+    placeholder for "no -m flag — whatever codex itself is configured
+    with"."""
     exe = resolve(provider)
     if not exe:
         raise RuntimeError(
             f"{LABELS.get(provider, provider)} not found "
             f"({_setting_exe(provider)!r}) — install it and log in, or set "
             "its path in .env.")
-    default_model, effort = model_effort(provider)
+    default_model, default_effort = model_effort(provider)
     model = default_model if model is None else model
+    effort = default_effort if effort is None else effort
     if model == "default":
         model = ""
     try:
@@ -206,5 +216,7 @@ def run(provider: str, prompt: str, system: Optional[str] = None,
 
 
 async def arun(provider: str, prompt: str, system: Optional[str] = None,
-               model: Optional[str] = None) -> Tuple[str, dict]:
-    return await asyncio.to_thread(run, provider, prompt, system, model)
+               model: Optional[str] = None,
+               effort: Optional[str] = None) -> Tuple[str, dict]:
+    return await asyncio.to_thread(run, provider, prompt, system, model,
+                                   effort)

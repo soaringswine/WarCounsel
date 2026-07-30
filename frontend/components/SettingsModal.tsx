@@ -45,9 +45,17 @@ type SettingsData = {
     anthropic_model: string;
     claude_cli_model: string;
     codex_cli_model: string;
+    claude_cli_effort: string;
+    codex_cli_effort: string;
     keys_set: Record<string, boolean>;
     available: Record<string, boolean>;
   };
+};
+
+/** Valid reasoning-effort values per coding-agent CLI. */
+const CLI_EFFORTS: Record<string, string[]> = {
+  claude_cli: ["low", "medium", "high", "xhigh", "max"],
+  codex_cli: ["minimal", "low", "medium", "high", "xhigh"],
 };
 
 const PROVIDERS = [
@@ -122,6 +130,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [gameDir, setGameDir] = useState("");
   const [provider, setProvider] = useState("none");
   const [model, setModel] = useState("");
+  const [cliEffort, setCliEffort] = useState("high");
   const [apiKey, setApiKey] = useState("");
   // Ollama's host is its own field: unlike LM Studio it is commonly on
   // ANOTHER machine, so it cannot be a fixed default.
@@ -148,6 +157,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           : d.llm.active.provider === "claude_cli" ? d.llm.claude_cli_model
           : d.llm.active.provider === "codex_cli" ? d.llm.codex_cli_model
           : d.llm.openai_model,
+        );
+        setCliEffort(
+          d.llm.active.provider === "codex_cli"
+            ? d.llm.codex_cli_effort
+            : d.llm.claude_cli_effort,
         );
         setOllamaUrl(d.llm.ollama_base_url ?? "");
         setCustomUrl(d.llm.custom_base_url ?? "");
@@ -211,6 +225,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         : next === "codex_cli" ? data.llm.codex_cli_model
         : "",
       );
+      setCliEffort(
+        next === "codex_cli" ? data.llm.codex_cli_effort
+        : data.llm.claude_cli_effort,
+      );
     },
     [data],
   );
@@ -251,8 +269,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         body.ollama_model = model;
         body.ollama_base_url = ollamaUrl.trim();
       }
-      if (provider === "claude_cli") body.claude_cli_model = model;
-      if (provider === "codex_cli") body.codex_cli_model = model;
+      if (provider === "claude_cli") {
+        body.claude_cli_model = model;
+        body.claude_cli_effort = cliEffort;
+      }
+      if (provider === "codex_cli") {
+        body.codex_cli_model = model;
+        body.codex_cli_effort = cliEffort;
+      }
       // Only send a key when one was typed. Omitting it leaves whatever is
       // stored untouched — saving the game folder must never wipe a key.
       const field = keyFieldFor(provider);
@@ -269,7 +293,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     } finally {
       setBusy(false);
     }
-  }, [gameDir, provider, model, apiKey, ollamaUrl, customUrl, onClose]);
+  }, [gameDir, provider, model, cliEffort, apiKey, ollamaUrl, customUrl, onClose]);
 
   const clearKey = useCallback(async () => {
     const field = keyFieldFor(provider);
@@ -442,6 +466,16 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         : "model (blank = codex default)"}
                       aria-label="CLI model"
                     />
+                    <select
+                      value={cliEffort}
+                      onChange={(e) => setCliEffort(e.target.value)}
+                      aria-label="Reasoning effort"
+                      title="Reasoning effort — how long the model thinks before answering"
+                    >
+                      {(CLI_EFFORTS[provider] ?? []).map((ef) => (
+                        <option key={ef} value={ef}>{ef} effort</option>
+                      ))}
+                    </select>
                   </div>
                   <ProbeRow
                     provider={provider}
@@ -454,11 +488,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     CLI as a one-off subprocess per consult — it uses its own{" "}
                     {provider === "claude_cli" ? "Claude" : "ChatGPT"} subscription
                     login, so no API key is stored here. Install it and log in
-                    once from a terminal first. Reasoning effort is set in{" "}
-                    <code>.env</code> ({provider === "claude_cli"
-                      ? "CLAUDE_CLI_EFFORT"
-                      : "CODEX_CLI_EFFORT"}, default high). Strong models at
-                    high effort can take minutes per consult.
+                    once from a terminal first. Strong models at high effort can
+                    take minutes per consult.
                   </p>
                 </>
               )}

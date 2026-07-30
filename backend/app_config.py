@@ -21,7 +21,8 @@ FIELDS = ("eql_game_dir", "eql_character_name", "llm_provider",
           "openai_model", "custom_model", "custom_base_url",
           "lmstudio_base_url", "model",
           "ollama_base_url", "ollama_model", "anthropic_model",
-          "claude_cli_model", "codex_cli_model")
+          "claude_cli_model", "codex_cli_model",
+          "claude_cli_effort", "codex_cli_effort")
 
 _PATH = data_path("app_config.json")
 
