@@ -782,24 +782,29 @@ whenever the Inventory parse changes.
   Rule: PROC (Combat) stones need a shared class between SOURCE and TARGET
   item (weapon->weapon, 2H proc -> Primary only); focus/clicky/worn need
   shared class + same slot. All from wiki Class/Slot/Skill lines.
-  - **The slot rule is NOT waived by export socket data** for focus/
-    clicky/worn stones. Per the wiki Exaltations page ("Restrictions"), a
-    stone IMPOSES its source item's class and equip-slot restrictions on
-    its host: socketing a SECONDARY-only instrument into a Head item
-    turns the hat Secondary-only — off the head. An empty socket proves
-    INSERTABILITY, not that the host keeps working where it is worn
-    (caught live: "move the drum into your cap" would have benched the
-    cap). Export sockets still override the weapon-only heuristic for
-    PROC stones (real exports show proc sockets on earrings/faces).
+  - **The wiki's slot-restriction-transfer claim did NOT survive live
+    play for focus stones — do not re-harden it.** The Exaltations page
+    says a stone imposes its source item's equip-slot restriction on its
+    host (its example is a PROC stone). Observed 2026-07-29, same day it
+    was briefly enforced unconditionally: a SECONDARY-sourced Hand Drum
+    stone hosted by a PRIMARY-only Rusty Spear, then by a Rusty Scimitar
+    WORN IN PRIMARY — the game accepted both, and briefing text that
+    asserted the hard rule cascaded into a checker finding and a
+    revision claiming the stone "gives nothing" in Primary. Current
+    policy: export socket data (empty socket of the right type) wins;
+    the shared-slot heuristic applies only to candidates with NO socket
+    data; class overlap stays binding; whether an effect works
+    identically from every host slot is UNVERIFIED and the prompts say
+    to suggest a one-time in-game check rather than assert.
   - **Bard instruments are exaltations with NO wiki Effect line** — the
     item IS the effect (a song modifier). They used to fall through to
     "no listed effect (stat stone?)", the prompt valued them at zero, and
     the model recommended swaps that stranded a Bard's drum and lute
     (live report, 2026-07-29). `_instrument_kind` (name token + Class:
-    BRD) now names them truthfully — including that the stone drags its
-    instrument's SECONDARY restriction onto its host, which is why a
-    statless item parked in an Any Slot as a stone carrier is a
-    deliberate setup, not filler.
+    BRD) now names them truthfully — and says a statless item parked as
+    a stone carrier is a deliberate setup, not filler. Host-slot
+    dependence of the modifier is explicitly UNVERIFIED (see the
+    slot-restriction bullet below).
   - **Sockets unlock by merge rank: exalt socket type N appears at rank
     N-6** (+1 focus 7, +2 clicky 8, +3 worn 9, +4 proc 10 — every worn
     row of real exports fits; user-confirmed an unmerged item accepts no
