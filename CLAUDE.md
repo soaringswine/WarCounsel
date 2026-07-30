@@ -751,12 +751,24 @@ whenever the Inventory parse changes.
   Rule: PROC (Combat) stones need a shared class between SOURCE and TARGET
   item (weapon->weapon, 2H proc -> Primary only); focus/clicky/worn need
   shared class + same slot. All from wiki Class/Slot/Skill lines.
+  - **The slot rule is NOT waived by export socket data** for focus/
+    clicky/worn stones. Per the wiki Exaltations page ("Restrictions"), a
+    stone IMPOSES its source item's class and equip-slot restrictions on
+    its host: socketing a SECONDARY-only instrument into a Head item
+    turns the hat Secondary-only — off the head. An empty socket proves
+    INSERTABILITY, not that the host keeps working where it is worn
+    (caught live: "move the drum into your cap" would have benched the
+    cap). Export sockets still override the weapon-only heuristic for
+    PROC stones (real exports show proc sockets on earrings/faces).
   - **Bard instruments are exaltations with NO wiki Effect line** — the
     item IS the effect (a song modifier). They used to fall through to
     "no listed effect (stat stone?)", the prompt valued them at zero, and
     the model recommended swaps that stranded a Bard's drum and lute
     (live report, 2026-07-29). `_instrument_kind` (name token + Class:
-    BRD) now names them truthfully.
+    BRD) now names them truthfully — including that the stone drags its
+    instrument's SECONDARY restriction onto its host, which is why a
+    statless item parked in an Any Slot as a stone carrier is a
+    deliberate setup, not filler.
   - **Sockets unlock by merge rank: exalt socket type N appears at rank
     N-6** (+1 focus 7, +2 clicky 8, +3 worn 9, +4 proc 10 — every worn
     row of real exports fits; user-confirmed an unmerged item accepts no

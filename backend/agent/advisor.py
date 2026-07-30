@@ -1255,7 +1255,7 @@ __CONTEXT__
 OWNED EQUIPMENT (from /outputfile inventory; [worn/bags/bank] shows where each lives; stats and drop sources are from the game's wiki):
 __GEAR__
 
-EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. Each socketed stone's line below states where it can LEGALLY move (machine-checked against real empty sockets — sockets unlock by merge rank, so an unmerged item has none): when it says NO legal empty socket exists, the stone cannot follow any winner — count it fully toward its host's value, and if you still recommend unseating that host, say plainly the effect is lost until a socket opens. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
+EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. A stone also IMPOSES its source item's class and equip-slot restrictions on whatever hosts it (a stone from a SECONDARY-only item makes its host Secondary/Any-Slot-only, and the host's usable classes shrink to the overlap) — so a statless item hosting a stone in an Any Slot is often a deliberate carrier, not filler. Each socketed stone's line below states where it can LEGALLY move (machine-checked: empty socket of its type — sockets unlock by merge rank, an unmerged item has none — plus class overlap plus slot compatibility): when it says NO legal empty socket exists, the stone cannot follow any winner — count it fully toward its host's value, and if you still recommend unseating that host, say plainly the effect is lost until a socket opens. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
 __EXALTS__
 
 __PET_BLOCK__
@@ -1487,18 +1487,25 @@ async def _exalt_targets(stone_name: str, styp: str,
             continue
         if not _class_overlap(src["classes"], tgt["classes"]):
             continue
-        if not socket_known:
-            # no export socket data — fall back to wiki heuristics. (Real
-            # exports show proc sockets on earrings/faces too, so when the
-            # game TELLS us a socket exists, it overrides these rules.)
-            if styp == "proc":
+        if styp == "proc":
+            # export socket data overrides the weapon-only heuristic here:
+            # real exports show proc sockets on earrings/faces
+            if not socket_known:
                 if not tgt["is_weapon"]:
                     continue
                 if src["is_2h"] and "PRIMARY" not in tgt["slots"]:
                     continue
-            else:  # focus / clicky / worn need a shared equipment slot
-                if not (src["slots"] & tgt["slots"]):
-                    continue
+        else:
+            # focus/clicky/worn: the stone IMPOSES its source item's
+            # equip-slot restriction on whatever hosts it (wiki Exaltations
+            # page, "Restrictions") — socketing a SECONDARY-only instrument
+            # into a Head item turns the hat Secondary-only, off the head.
+            # An empty socket proves INSERTABILITY, not that the host keeps
+            # working where it is worn, so this runs even with export
+            # socket data. (Caught live: "move the drum into your cap"
+            # would have benched the cap.)
+            if not (src["slots"] & tgt["slots"]):
+                continue
         out.append(cand)
     return out
 
@@ -1674,9 +1681,16 @@ async def generate_gear_advice(ctx: dict) -> dict:
                     # the effect. Naming that here is what stops the model
                     # from writing off a Bard's drum as a worthless stone.
                     kind = _instrument_kind(bname, full_line)
+                    sm2 = re.search(r"Slot: ([A-Z ]+)", full_line)
+                    src_slots = (sm2.group(1).strip() if sm2 else "")
                     eff = (f"Bard instrument ({kind}) — its {kind} song "
                            "modifier applies while the stone sits in "
-                           "equipped gear; real value for a Bard"
+                           "equipped gear; real value for a Bard. The stone "
+                           f"imposes its {src_slots or 'source-item'} "
+                           "equip restriction on whatever hosts it, so its "
+                           "host belongs there or in an Any Slot — a junk "
+                           "item parked in an Any Slot as its carrier is a "
+                           "DELIBERATE setup, not filler"
                            if kind else "no listed effect (stat stone?)")
                 usable = _trio_usable(full_line, classes)
         except Exception:
