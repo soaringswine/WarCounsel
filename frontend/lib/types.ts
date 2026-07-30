@@ -415,6 +415,16 @@ export interface GearAdvice {
   /** second/third opinions on the gear table (same check slots as the
    *  counsel checks, gear-shaped rubric — reviews the table JOINTLY) */
   doublechecks?: { second?: DoubleCheck; third?: DoubleCheck };
+  /** Present when this table is a REVISION built from check findings and
+   *  re-passed through every gear gate. */
+  revision?: {
+    notes: string | null;
+    declined: { item: string; reason: string }[];
+    reviews?: { second?: DoubleCheck; third?: DoubleCheck };
+    provider: string;
+    model: string;
+    generated: string;
+  };
   /** which provider/model was configured when this was produced */
   llm?: { provider: string; model: string };
   source: "llm" | "builtin";

@@ -279,6 +279,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [gearDcBusy, setGearDcBusy] = useState<"second" | "third" | null>(null);
   const [gearDcError, setGearDcError] = useState<string | null>(null);
   const [revBusy, setRevBusy] = useState(false);
+  const [gearRevBusy, setGearRevBusy] = useState(false);
   const [dcDebug, setDcDebug] = useState(false);
   const [cliDraft, setCliDraft] = useState<
     Record<string, { model: string; effort: string }>
@@ -597,6 +598,19 @@ export const AdvisorPanel = memo(function AdvisorPanel({
       setDcError(unwrapApiError(e));
     } finally {
       setRevBusy(false);
+    }
+  };
+
+  const reviseGear = async () => {
+    setGearRevBusy(true);
+    setGearDcError(null);
+    try {
+      const r = await apiSend<GearAdvice>("/api/gear/revise", {});
+      setGear(r);
+    } catch (e) {
+      setGearDcError(unwrapApiError(e));
+    } finally {
+      setGearRevBusy(false);
     }
   };
 
@@ -1364,6 +1378,23 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                 </div>
               )}
               {gear?.note && <div className="adv-note">{gear.note}</div>}
+              {gear?.revision && (
+                <div className="adv-note">
+                  <strong>Revised gear table</strong> — {gear.revision.model} applied
+                  the check findings and re-passed every gear gate
+                  {gear.revision.notes ? <>: {gear.revision.notes}</> : "."}
+                  {gear.revision.declined.length > 0 && (
+                    <ul className="adv-list" style={{ marginTop: 6 }}>
+                      {gear.revision.declined.map((d) => (
+                        <li key={d.item} data-dim>
+                          <span className="adv-cls">declined:</span>{" "}
+                          <strong>{d.item}</strong> — {d.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
               {gear && (
                 <div className="adv-dc">
                   <div className="adv-dc-bar">
@@ -1388,7 +1419,25 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                           : `${gear.doublechecks?.[slot] ? "re-run" : "run"} ${slot === "second" ? "2nd" : "3rd"} check`}
                       </button>
                     ))}
+                    {(gear.doublechecks?.second || gear.doublechecks?.third) && (
+                      <button
+                        type="button"
+                        className="adv-rescan adv-gear-btn adv-dc-btn"
+                        onClick={reviseGear}
+                        disabled={gearRevBusy || gearDcBusy !== null || gearLoading}
+                        title="Feed these findings back through your counsel model for a revised gear table — it re-passes every gear gate before replacing this one, and the checks reset"
+                      >
+                        {gearRevBusy ? "revising…" : "revise gear with findings"}
+                      </button>
+                    )}
                   </div>
+                  {gearRevBusy && (
+                    <div className="adv-gear-loading" role="status" aria-live="polite">
+                      <span className="adv-gear-spin" aria-hidden />
+                      Revising the gear table — applying the findings, then
+                      every gate re-runs… (can take minutes)
+                    </div>
+                  )}
                   {gearDcBusy && (
                     <div className="adv-gear-loading" role="status" aria-live="polite">
                       <span className="adv-gear-spin" aria-hidden />

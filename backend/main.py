@@ -1515,24 +1515,80 @@ async def get_gear(refresh: bool = False, cached: bool = False):
         if _gear_cache is not None:
             return {**_gear_cache, "stale": True}
         return {"cached": False}
-    from backend import loot_filter
-    lf = loot_filter.load(tracker.name, tracker.server)
-    ctx = {"class_str": tracker.class_str, "level": tracker.level,
-           "race": tracker.race, "playstyle": tracker.playstyle,
-           "worn": (inv or {}).get("worn"),
-           "inventory_items": (inv or {}).get("items"),
-           "exaltations": (inv or {}).get("exaltations"),
-           "item_sockets": (inv or {}).get("item_sockets"),
-           "loot_filter": lf["actions"] if lf else None,
-           "pet_slots": tracker.pet_slots,
-           "pet_classes": tracker.pet_classes,
-           "pet_inventory": dict(tracker.pet_inventory),
-           "max_hp": tracker.max_hp, "max_mana": tracker.max_mana,
-           "combat": tracker.combat_profile()}
-    advice = await generate_gear_advice(ctx)
+    advice = await generate_gear_advice(_gear_ctx(inv))
     _gear_cache, _gear_sig = advice, sig
     _save_advice_cache()
     return advice
+
+
+def _gear_ctx(inv=None) -> dict:
+    """The gear consult context from live tracker state + exports —
+    shared by the consult route and the gear revise route."""
+    if inv is None:
+        inv = load_export(tracker.name, tracker.server, "Inventory")
+    from backend import loot_filter
+    lf = loot_filter.load(tracker.name, tracker.server)
+    return {"class_str": tracker.class_str, "level": tracker.level,
+            "race": tracker.race, "playstyle": tracker.playstyle,
+            "worn": (inv or {}).get("worn"),
+            "inventory_items": (inv or {}).get("items"),
+            "exaltations": (inv or {}).get("exaltations"),
+            "item_sockets": (inv or {}).get("item_sockets"),
+            "loot_filter": lf["actions"] if lf else None,
+            "pet_slots": tracker.pet_slots,
+            "pet_classes": tracker.pet_classes,
+            "pet_inventory": dict(tracker.pet_inventory),
+            "max_hp": tracker.max_hp, "max_mana": tracker.max_mana,
+            "combat": tracker.combat_profile()}
+
+
+@app.post("/api/gear/revise")
+async def gear_revise():
+    """The gear twin of /api/advisor/revise: briefing + gear table + the
+    stored check findings go back through the ACTIVE counsel model, and
+    the revised table re-enters every gear gate (owned/slot-fit/trio,
+    2H consistency, exalt displacement, Any Slot semantics). Failures
+    keep the original table untouched."""
+    global _gear_cache
+    if _gear_cache is None or not _gear_cache.get("_prompt"):
+        raise HTTPException(409, "No gear counsel with a stored briefing — "
+                                 "consult gear with a model first.")
+    reviews = _gear_cache.get("doublechecks") or {}
+    if not reviews:
+        raise HTTPException(409, "No check findings to revise with — run "
+                                 "a gear 2nd (or 3rd) check first.")
+    from backend.llm_runtime import active, model_for
+    prov = active()["provider"]
+    if prov == "none":
+        raise HTTPException(409, "Revision needs a model — pick one in "
+                                 "the Counsel selector.")
+    from backend.agent.doublecheck import run_revision
+    data, err = await run_revision(_gear_cache["_prompt"], _gear_cache,
+                                   reviews, prov)
+    if err:
+        raise HTTPException(502, f"gear revision failed: {err}")
+    revision_meta = {
+        "notes": (str(data.pop("revision_notes", "") or "").strip()[:600]
+                  or None),
+        "declined": [
+            {"item": str(d.get("item") or "")[:120],
+             "reason": str(d.get("reason") or "")[:300]}
+            for d in (data.pop("declined_findings", None) or [])
+            if isinstance(d, dict) and d.get("item")][:8],
+        "reviews": reviews,
+        "provider": prov, "model": model_for(prov),
+        "generated": datetime.now().isoformat(timespec="seconds"),
+    }
+    revised = await generate_gear_advice(_gear_ctx(), reply_json=data,
+                                         briefing=_gear_cache["_prompt"])
+    if revised.get("source") != "llm":
+        raise HTTPException(502, "the revised gear table failed the "
+                                 "verification gates — keeping the "
+                                 "original.")
+    revised["revision"] = revision_meta
+    _gear_cache = revised
+    _save_advice_cache()
+    return revised
 
 
 @app.post("/api/gear/doublecheck")

@@ -1807,7 +1807,12 @@ async def _merge_opportunities(items: list, exalts: list,
     return out
 
 
-async def generate_gear_advice(ctx: dict) -> dict:
+async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
+                               briefing: Optional[str] = None) -> dict:
+    """Gear consult, or — with `reply_json` — gate a REVISION through the
+    exact same machine-verification path (see generate_advice's twin
+    parameter). A revision that fails gating returns source="builtin";
+    callers treat that as failure and keep the previous counsel."""
     from backend.game_data import build_gear_context
 
     items = ctx.get("inventory_items") or []
@@ -1829,7 +1834,7 @@ async def generate_gear_advice(ctx: dict) -> dict:
                 "No inventory export found — type /outputfile inventory "
                 "in-game, then press check exports.",
                 "slots": [], "farm": [], "exaltations": [], "pet_gear": [], "unknown": []}
-    if llm_active()["provider"] == "none":
+    if reply_json is None and llm_active()["provider"] == "none":
         return {**base, **(await _builtin_gear(ctx))}
     classes = [x.strip() for x in (ctx.get("class_str") or "").split("/")
                if x.strip()]
@@ -2116,23 +2121,30 @@ async def generate_gear_advice(ctx: dict) -> dict:
     # on the deterministic path: it needs the full mined gear context, so
     # a builtin gear cache simply has no briefing and the check endpoint
     # says to re-consult with a model instead.
-    base["_prompt"] = prompt
-    budget = await asyncio.to_thread(_lmstudio_budget, len(prompt))
-    llm = get_llm()
-    bound = llm
-    if budget:
-        try:
-            bound = llm.bind(max_tokens=budget)
-        except Exception:
-            pass
+    base["_prompt"] = (briefing or prompt) if reply_json is not None else prompt
     try:
-        response = await bound.ainvoke([HumanMessage(content=prompt)])
-        raw = _reply_text(response)
-        data = _extract_json(raw)
-        if not data:
-            raise ValueError(
-                "no JSON object in LLM reply "
-                f"({len(raw)} chars of text seen)")
+        if reply_json is not None:
+            # revision path: the reply was produced against the ORIGINAL
+            # briefing plus review findings — skip the LLM call, keep the
+            # same gates. The setup above (gear context, exalt destination
+            # data, stranded map) recomputed from cache-warm wiki lines.
+            data = reply_json
+        else:
+            budget = await asyncio.to_thread(_lmstudio_budget, len(prompt))
+            llm = get_llm()
+            bound = llm
+            if budget:
+                try:
+                    bound = llm.bind(max_tokens=budget)
+                except Exception:
+                    pass
+            response = await bound.ainvoke([HumanMessage(content=prompt)])
+            raw = _reply_text(response)
+            data = _extract_json(raw)
+            if not data:
+                raise ValueError(
+                    "no JSON object in LLM reply "
+                    f"({len(raw)} chars of text seen)")
     except Exception as e:
         logger.warning("Gear advisor failed: %.140s", str(e))
         try:
