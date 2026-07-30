@@ -1804,6 +1804,79 @@ button.app-version:hover { color: var(--gold-bright); }
   padding-top: 8px;
 }
 
+/* Ask the counsel — grounded chat beside the advice it is about. */
+.adv-chat {
+  border: 1px solid var(--hairline-dim);
+  padding: 8px 10px;
+  margin-bottom: 14px;
+}
+
+.adv-chat-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.adv-chat-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.adv-chat-log {
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.adv-chat-msg {
+  font-size: 12.5px;
+  border-left: 2px solid var(--hairline-dim);
+  padding-left: 8px;
+}
+
+.adv-chat-msg[data-role="user"] {
+  border-left-color: var(--gold);
+  color: var(--muted);
+}
+
+.adv-chat-who {
+  display: block;
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+.adv-chat-form {
+  display: flex;
+  gap: 6px;
+}
+
+.adv-chat-form input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.adv-chat-form button {
+  background: rgba(200, 170, 110, 0.10);
+  border: 1px solid var(--hairline);
+  color: var(--gold);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.adv-chat-form button:hover:not(:disabled) { background: rgba(200, 170, 110, 0.18); }
+.adv-chat-form button:disabled { opacity: 0.5; cursor: default; }
+
 .adv-cli-prefs {
   display: inline-flex;
   align-items: center;

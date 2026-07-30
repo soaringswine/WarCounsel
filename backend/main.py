@@ -1576,6 +1576,75 @@ def _gear_ctx(inv=None) -> dict:
             "combat": tracker.combat_profile()}
 
 
+class CounselChatRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/advisor/chat")
+async def advisor_chat(request: CounselChatRequest,
+                       db: Session = Depends(get_db)):
+    """Talk to the counsel. Grounded in the SAME briefing the consult used
+    plus the counsel, gear table and check findings as displayed — this is
+    the conversational seat the old /api/chat agent never had (it rewrote
+    mock suggestion data, which is why its tab was retired).
+
+    Works before a consult too: with no cached counsel the briefing is
+    rendered wiki-less from live state, so questions about owned spells,
+    gear and hunting grounds still have real data behind them."""
+    msg = (request.message or "").strip()
+    if not msg:
+        raise HTTPException(400, "empty message")
+    from backend.llm_runtime import active, model_for
+    prov = active()["provider"]
+    if prov == "none":
+        raise HTTPException(409, "Chat needs a model — pick one in the "
+                                 "Counsel selector (the deterministic "
+                                 "advisor cannot hold a conversation).")
+    briefing = (_advice_cache or {}).get("_prompt")
+    if not briefing:
+        # no consult yet (or a deterministic one): build the same briefing
+        # without the wiki share — owned state and class guides still apply
+        from backend.agent.advisor import _build_prompt, _permanent_buffs
+        ctx = _advisor_ctx()
+        try:
+            ctx["_hunting"] = (await hunting_candidates(int(ctx["level"]))
+                               if ctx.get("level") else [])
+        except Exception:
+            ctx["_hunting"] = []
+        try:
+            ctx["_permanent"] = _permanent_buffs(ctx)
+        except Exception:
+            ctx["_permanent"] = []
+        briefing = _build_prompt(ctx, "")
+    live = (f"Level {tracker.level or '?'} {tracker.class_str or '?'} "
+            f"({tracker.race or '?'}) in {tracker.zone or 'an unknown zone'}; "
+            f"max HP {tracker.max_hp or '?'}, max mana {tracker.max_mana or '?'}; "
+            f"unspent AA {tracker.aa_available if tracker.aa_available is not None else '?'}; "
+            f"focus {tracker.playstyle or 'balanced'}. "
+            f"Recent: {tracker.recent_activity_summary() or 'nothing notable'}")
+    history = []
+    if _character_id:
+        rows = (db.query(ChatMessageRow)
+                .filter(ChatMessageRow.character_id == _character_id)
+                .order_by(ChatMessageRow.id.desc()).limit(10).all())
+        history = [{"role": r.role, "content": r.content} for r in reversed(rows)]
+    from backend.agent.counsel_chat import answer
+    try:
+        reply = await answer(msg, briefing, _advice_cache, _gear_cache,
+                             live, history)
+    except Exception as e:
+        logger.warning("Counsel chat failed: %.200s", str(e))
+        raise HTTPException(502, f"chat failed: {str(e)[:300]}")
+    if _character_id:
+        db.add(ChatMessageRow(character_id=_character_id, role="user",
+                              content=msg))
+        db.add(ChatMessageRow(character_id=_character_id, role="assistant",
+                              content=reply))
+        db.commit()
+    return {"reply": reply, "model": model_for(prov), "provider": prov,
+            "grounded": bool((_advice_cache or {}).get("_prompt"))}
+
+
 @app.post("/api/gear/revise")
 async def gear_revise():
     """The gear twin of /api/advisor/revise: briefing + gear table + the

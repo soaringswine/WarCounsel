@@ -1,9 +1,9 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiSend } from "@/lib/api";
 import { ItemHover } from "./ItemHover";
-import type { Advice, DoubleCheck, ExportsStatus, GearAdvice, HuntingData, LlmInfo, OwnedAAsInfo, Snapshot, SpellbookInfo } from "@/lib/types";
+import type { Advice, ChatMessage, DoubleCheck, ExportsStatus, GearAdvice, HuntingData, LlmInfo, OwnedAAsInfo, Snapshot, SpellbookInfo } from "@/lib/types";
 
 const CLASSES = [
   "Bard", "Beastlord", "Berserker", "Cleric", "Druid", "Enchanter",
@@ -52,6 +52,23 @@ function unwrapApiError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   const m = msg.match(/"detail"\s*:\s*"((?:[^"\\]|\\.)*)/);
   return m ? m[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\") : msg;
+}
+
+/** Minimal markdown for chat replies: **bold** and line breaks, never
+ *  raw HTML — same treatment the retired companion panel used. */
+function chatText(text: string) {
+  return text.split("\n").map((line, li) => (
+    <Fragment key={li}>
+      {li > 0 && <br />}
+      {line.split(/(\*\*[^*]+\*\*)/g).map((part, pi) =>
+        part.startsWith("**") && part.endsWith("**") ? (
+          <strong key={pi}>{part.slice(2, -2)}</strong>
+        ) : (
+          <Fragment key={pi}>{part}</Fragment>
+        ),
+      )}
+    </Fragment>
+  ));
 }
 
 const AGREEMENT_TEXT: Record<string, string> = {
@@ -280,6 +297,11 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [gearDcError, setGearDcError] = useState<string | null>(null);
   const [revBusy, setRevBusy] = useState(false);
   const [gearRevBusy, setGearRevBusy] = useState(false);
+  const [chatMsgs, setChatMsgs] = useState<ChatMessage[]>([]);
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const chatEnd = useRef<HTMLDivElement | null>(null);
   const [dcDebug, setDcDebug] = useState(false);
   const [cliDraft, setCliDraft] = useState<
     Record<string, { model: string; effort: string }>
@@ -584,6 +606,37 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     }
   };
 
+  // chat history survives restarts (same per-character table the old
+  // companion tab used); load it once so a reload keeps the thread
+  useEffect(() => {
+    apiGet<{ messages: ChatMessage[] }>("/api/chat/history?limit=20")
+      .then((r) => setChatMsgs(r.messages ?? []))
+      .catch(() => undefined);
+  }, []);
+
+  const askCounsel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = chatDraft.trim();
+    if (!q || chatBusy) return;
+    setChatBusy(true);
+    setChatError(null);
+    setChatDraft("");
+    setChatMsgs((m) => [...m, { role: "user", content: q }]);
+    try {
+      const r = await apiSend<{ reply: string }>("/api/advisor/chat", { message: q });
+      setChatMsgs((m) => [...m, { role: "assistant", content: r.reply }]);
+    } catch (err) {
+      setChatError(unwrapApiError(err));
+    } finally {
+      setChatBusy(false);
+    }
+  };
+
+  // pin to the newest message, but only while the thread is in play
+  useEffect(() => {
+    if (chatMsgs.length) chatEnd.current?.scrollIntoView({ block: "nearest" });
+  }, [chatMsgs.length, chatBusy]);
+
   // Close the loop: feed the stored check findings back through the
   // counsel model; the revision re-passes every deterministic gate
   // server-side before it replaces the display. Failures keep the
@@ -870,6 +923,48 @@ export const AdvisorPanel = memo(function AdvisorPanel({
               : "No counsel yet — press Consult."}
           </p>
         )}
+
+        <div className="adv-chat">
+          <div className="adv-chat-head">
+            <span className="adv-sub">Ask the counsel</span>
+            <span className="adv-chat-hint">
+              {advice
+                ? "grounded in this counsel, your gear table, and the check findings"
+                : "grounded in your owned spells, gear and class guides — consult for more"}
+            </span>
+          </div>
+          {chatMsgs.length > 0 && (
+            <div className="adv-chat-log">
+              {chatMsgs.map((m, i) => (
+                <div key={i} className="adv-chat-msg" data-role={m.role}>
+                  <span className="adv-chat-who">
+                    {m.role === "user" ? "you" : "counsel"}
+                  </span>
+                  <div>{chatText(m.content)}</div>
+                </div>
+              ))}
+              <div ref={chatEnd} />
+            </div>
+          )}
+          <form className="adv-chat-form" onSubmit={askCounsel}>
+            <input
+              type="text"
+              value={chatDraft}
+              onChange={(e) => setChatDraft(e.target.value)}
+              placeholder={
+                advice
+                  ? "why that pick? what should I buy next? is Leech worth it at 9?"
+                  : "ask about your spells, gear, or where to hunt…"
+              }
+              aria-label="Ask the counsel"
+              disabled={chatBusy}
+            />
+            <button type="submit" disabled={chatBusy || !chatDraft.trim()}>
+              {chatBusy ? "thinking…" : "ask"}
+            </button>
+          </form>
+          {chatError && <p className="adv-dc-error" role="alert">{chatError}</p>}
+        </div>
         {advice && (
           <>
             <div className="adv-counsel-section">

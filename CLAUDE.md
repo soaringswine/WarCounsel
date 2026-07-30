@@ -430,7 +430,13 @@ throttled `state` pushes. REST highlights (see main.py for all):
 
 - `GET /api/character` (snapshot) · `PATCH /api/character` (trio/level/AA/slots)
 - `GET /api/characters` + `POST /api/character/select` — multi-log switching
-- `GET /api/events|encounters|chat/history` · `POST /api/chat`
+- `GET /api/events|encounters|chat/history` · `POST /api/chat` (the
+  retired mock-data agent) · `POST /api/advisor/chat` — the GROUNDED
+  chat seat in the Advisor tab: same briefing the consult used, plus the
+  counsel, the gear table's changed rows and any check findings, through
+  the active provider (`backend/agent/counsel_chat.py`). Works before a
+  consult too — the briefing renders wiki-less from live owned state.
+  History persists in the same per-character `chat_messages` table
 - `GET /api/advisor` / `GET /api/gear` — LLM consults; `?refresh=1` forces,
   `?cached=1` returns the cache instantly or `{"cached": false}` WITHOUT
   running the LLM (the tab restores results on load; consults are
