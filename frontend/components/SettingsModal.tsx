@@ -40,6 +40,13 @@ type SettingsData = {
     custom_model: string;
     custom_base_url: string;
     lmstudio_base_url: string;
+    context?: {
+      limit: number;
+      source: "manual" | "probed" | "default";
+      detected: number | null;
+      guide_budget: number;
+      manual: string;
+    };
     ollama_base_url: string;
     ollama_model: string;
     anthropic_model: string;
@@ -137,6 +144,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Ollama's host is its own field: unlike LM Studio it is commonly on
   // ANOTHER machine, so it cannot be a fixed default.
   const [ollamaUrl, setOllamaUrl] = useState("");
+  const [ctxLimit, setCtxLimit] = useState("");
   const [customUrl, setCustomUrl] = useState("");
   const [probe, setProbe] = useState<LlmProbe | null>(null);
   const [probing, setProbing] = useState(false);
@@ -166,6 +174,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             : d.llm.claude_cli_effort,
         );
         setOllamaUrl(d.llm.ollama_base_url ?? "");
+        setCtxLimit(d.llm.context?.manual ?? "");
         setCustomUrl(d.llm.custom_base_url ?? "");
         setVerdict(d.game);
       })
@@ -279,6 +288,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         body.codex_cli_model = model;
         body.codex_cli_effort = cliEffort;
       }
+      // Always sent, for every provider: an empty string CLEARS the pin and
+      // returns to following the server, which a conditional send could not
+      // express.
+      body.llm_context_limit = ctxLimit.trim();
       // Only send a key when one was typed. Omitting it leaves whatever is
       // stored untouched — saving the game folder must never wipe a key.
       const field = keyFieldFor(provider);
@@ -295,7 +308,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     } finally {
       setBusy(false);
     }
-  }, [gameDir, provider, model, cliEffort, apiKey, ollamaUrl, customUrl, onClose]);
+    // ctxLimit belongs here even though a fresh `onClose` arrow from
+    // page.tsx currently rebuilds this callback every render: an empty
+    // string CLEARS the pin, so a stale closure would not merely miss an
+    // edit, it would silently erase a set one.
+  }, [gameDir, provider, model, cliEffort, ctxLimit, apiKey, ollamaUrl,
+      customUrl, onClose]);
 
   const clearKey = useCallback(async () => {
     const field = keyFieldFor(provider);
@@ -506,6 +524,40 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <p className="set-note">
                   Uses LM Studio&apos;s local server at{" "}
                   <code>{data.llm.lmstudio_base_url}</code>. No key needed.
+                </p>
+                <div className="set-row">
+                  <input
+                    value={ctxLimit}
+                    spellCheck={false}
+                    inputMode="numeric"
+                    onChange={(e) => setCtxLimit(e.target.value)}
+                    placeholder={
+                      data.llm.context?.detected
+                        ? `auto: ${data.llm.context.detected}`
+                        : "context tokens, e.g. 8192"
+                    }
+                    aria-label="Context limit override"
+                  />
+                </div>
+                <p className="set-note">
+                  {data.llm.context?.detected ? (
+                    <>
+                      Detected <strong>{data.llm.context.detected}</strong>{" "}
+                      tokens loaded. Prompts are sized to this
+                      {data.llm.context.source === "manual" && (
+                        <> — currently overridden to{" "}
+                        <strong>{data.llm.context.limit}</strong></>
+                      )}
+                      . Leave blank to follow the server; set a smaller
+                      number if a reload brings the model back with less.
+                    </>
+                  ) : (
+                    <>
+                      No loaded model detected, so prompts use a
+                      conservative {data.llm.context?.limit ?? 8192} tokens.
+                      Check the server above, or pin a value here.
+                    </>
+                  )}
                 </p>
                 </>
               )}

@@ -924,6 +924,22 @@ Both paths confirm the target really is an overlay first: pids are recycled.
 substring test on "overlay" also matches `--ocr-overlay`, so the combat
 toggle could kill the OCR calibrator.
 
+**Finding the reload worker at all: never grep its command line.** uvicorn
+`--reload` runs the app in a MULTIPROCESSING SPAWN child whose argv is
+`python -c "from multiprocessing.spawn import spawn_main; spawn_main(...)"
+--multiprocessing-fork` — containing neither `uvicorn` nor `backend.main`.
+Every search for those strings returns nothing while the server is plainly
+serving, and `netstat` credits the LISTEN socket to the reloader PARENT,
+which may already be dead: `taskkill /PID <that>` answers "process not
+found" while the port stays bound and answers HTTP. Symptoms are a stale
+version served forever and a fresh launch dying on `[Errno 10048]`. Find it
+by walking the process tree — its MCP `node` child names it via
+ParentProcessId — or from the parent pid netstat reports, then kill the
+tree. Two corollaries learned the hard way: a process match on command-line
+text also matches the SHELL RUNNING THE SEARCH (this killed the debugging
+shell twice), and Git Bash rewrites `/PID` into a path, so `taskkill` must
+run from PowerShell or cmd.
+
 ## LLM runtime (backend/llm_runtime.py)
 
 - Providers: `none` (deterministic) | `lmstudio` | `openai` | `custom` (any
@@ -1032,6 +1048,62 @@ toggle could kill the OCR calibrator.
     the CONFIGURED model is among those installed — so that is what the
     status line leads with, and the only thing that turns it amber.
 - Chat (agent/graph.py) uses the same `get_llm()` seam.
+
+## Prompt sizing is adaptive (`context_limit` / `guide_budget`)
+
+`_lmstudio_budget` always read the LOADED context to size max_tokens; the
+INPUT side ignored it and used a fixed guide budget picked for an 8k model,
+so a 32k window was mostly wasted. `llm_runtime.context_limit()` resolves
+manual > probed > default and `game_data.guide_budget()` scales the
+per-guide cap from it (floor 3200, ceiling 9000 — beyond that guides crowd
+out the gear/spell context they exist to inform, and a 10k-token prompt
+measured ~3.9s locally).
+
+- **Cloud providers are never scaled up.** Ample context, billed tokens.
+- **The manual override lives in `app_config.json`, not `llm_config.json`.**
+  Reading the wrong file made a pinned value silently do nothing. The
+  settings panel writes every non-secret override to app_config.
+- **Blank clears the pin**, so the save must be unconditional — a
+  provider-scoped send cannot express "stop overriding".
+- Probed value is cached 60s: this is consulted while BUILDING a prompt, so
+  an unreachable server would pay the 2.5s timeout per consult (2.09s cold
+  vs 0.0005s warm).
+- **Splitting one consult into concurrent sub-prompts was measured and
+  REJECTED.** LM Studio does batch genuinely (4 requests returned within
+  0.01s of each other), but the speedup collapses as prompts grow — 3.30x
+  at 20 tokens, 1.83x at 2600 — and splitting duplicates shared context:
+  one 10,206-token prompt took 3.94s against 5.86s for four 2,767-token
+  ones sending 1.08x the tokens. Do not revisit without new measurements.
+
+## Spell timer tiers
+
+Upgrading a spell lengthens it (+10%/tier buffs and debuffs, +5% DoTs and
+HoTs, from eqltools /learn/spell-upgrades). The log carries the tier as a
+roman numeral, so `parser.spell_tier()` reads what `strip_tier()` drops.
+
+- Scaled ONLY for `BASE_DURATION_ROWS` — the 94 rows whose value is the
+  game's own durationTicks. A community-measured pack row was timed at an
+  unknown tier; scaling it again compounds a tier already baked in and
+  produces a timer that outlives its spell. An unmarked row stays flat,
+  which is the safe default for anything added later.
+- The DoT rate is applied to everything (telling a DoT from a debuff needs
+  data the snapshot lacks) and results round DOWN. Every remaining error
+  therefore points at under-promising.
+
+## The ZEM sheet's Type column is OPTIONAL
+
+61 of 119 rows omit it, including the whole Faydark block. Assigning
+columns by position put a level RANGE into `type`, left lo/hi None, and
+shifted every quality circle one column left — Crushbone parsed as
+efficient at level 1 when its row says poor, seven zones lost their band
+and were dropped, and the City exclusion (`type == "City"`) silently
+stopped applying to half the table. Detect the row shape: a leading cell
+matching a level range means Type is absent.
+
+**Do not filter candidates to `type == "Dungeon"`.** 15 in-era rows carry
+no Type at all and Crushbone is one of them, so a hard filter drops the
+zone most often wanted at that level. Dungeons outrank open zones at EQUAL
+quality instead — a tiebreak, never a gate.
 
 ## Wiki grounding
 
@@ -1217,7 +1289,7 @@ model selection itself is runtime-switchable in the UI.
 
 ## Releasing
 
-Latest: **v2.1.9**. MCP server clone at `MCP_SERVER_DIR` is
+Latest: **v2.1.11**. MCP server clone at `MCP_SERVER_DIR` is
 **ArtSabintsev/everquest-legends-mcp** — note a DIFFERENT project shares that
 name (Sergeantfirstclass...); it has no tags and no `src/data/eqlbuilds`, so
 builds_data.py finds nothing there. Local clone is on **v1.3.4**; **v1.3.5**

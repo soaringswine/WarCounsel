@@ -632,7 +632,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.1.9"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.1.11"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -1063,9 +1063,13 @@ async def run_update():
         cwd=str(bat.parent),
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
+    # NOT "the app restarts itself" -- update_companion.bat ends with
+    # "Updated. Start it again with start_companion.bat", so telling the
+    # user to just refresh left them waiting for something that never
+    # happens.
     return {"launched": True,
-            "note": "Updating in a separate window — the app restarts "
-                    "itself; refresh this page when the window says done."}
+            "note": "Updater opened in its own window — restart the app "
+                    "when it finishes."}
 
 
 @app.get("/api/llm")
@@ -1214,6 +1218,22 @@ def _describe_game_dir(path: str) -> dict:
             "reason": f"{len(found)} character log(s) found"}
 
 
+def _context_info() -> dict:
+    """context_limit() plus the guide budget it produces, for the panel."""
+    try:
+        from backend import app_config as _cfg
+        from backend.llm_runtime import context_limit
+        from backend.game_data import guide_budget
+        info = dict(context_limit())
+        info["guide_budget"] = guide_budget()
+        info["manual"] = _cfg.load().get("llm_context_limit") or ""
+        return info
+    except Exception:
+        logger.debug("context info unavailable", exc_info=True)
+        return {"limit": 8192, "source": "default", "detected": None,
+                "guide_budget": 3200, "manual": ""}
+
+
 @app.get("/api/settings")
 async def api_settings_get():
     """Everything the settings panel needs. Secrets are reported as
@@ -1248,6 +1268,12 @@ async def api_settings_get():
             "codex_cli_effort": effort_for("codex_cli"),
             "keys_set": which_are_set(),
             "available": available(),
+            # Context window we will size prompts against: probed from a
+            # local server when one answers, overridable by the player,
+            # else a conservative default. `detected` is reported even
+            # when a manual value wins, so the panel can show what the
+            # server actually has loaded next to what is pinned.
+            "context": _context_info(),
         },
         "overrides": sorted(overrides().keys()),
         # Bundled-data health. Packaged builds resolve these out of the

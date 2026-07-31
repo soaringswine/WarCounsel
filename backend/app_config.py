@@ -22,7 +22,8 @@ FIELDS = ("eql_game_dir", "eql_character_name", "llm_provider",
           "lmstudio_base_url", "model",
           "ollama_base_url", "ollama_model", "anthropic_model",
           "claude_cli_model", "codex_cli_model",
-          "claude_cli_effort", "codex_cli_effort")
+          "claude_cli_effort", "codex_cli_effort",
+          "llm_context_limit")
 
 _PATH = data_path("app_config.json")
 

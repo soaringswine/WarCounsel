@@ -634,21 +634,9 @@ async def item_line(name: str) -> Optional[str]:
     not equipment."""
     base = _strip_upgrade(name)
     key = base.lower()
-    # A player-supplied line WINS over the wiki cache miss and over the
-    # wiki itself: launch shipped items eqlwiki has no page for, including
-    # gear people are already wearing, and the owner reading numbers off
-    # the item is a better source than nothing. Checked FIRST so it also
-    # short-circuits the network round trip.
-    try:
-        from backend import item_facts
-        supplied = item_facts.stats_for(0, base)
-    except Exception:
-        supplied = None
-    if supplied:
-        return supplied[0]
     cached = wiki_page_cache.get("item_line2", key)
     if cached is not None:
-        return cached or None
+        return cached or _supplied_line(base)
     page = await get_mcp_client().wiki_page(base, max_characters=4000)
     if page is None:
         # exact title missed — fuzzy-resolve (punctuation/case drift
@@ -668,10 +656,30 @@ async def item_line(name: str) -> Optional[str]:
         if stale:
             return stale
         wiki_page_cache.set("", 3600, "item_line2", key)
-        return None
+        return _supplied_line(base)
     line = _compact_item(page.get("text", ""))
     wiki_page_cache.set(line or "", WIKI_TTL, "item_line2", key)
-    return line
+    return line or _supplied_line(base)
+
+
+def _supplied_line(base: str) -> Optional[str]:
+    """Stats a PLAYER typed in, used ONLY where the wiki has nothing.
+
+    This is a LAST resort, not a first one. It briefly ran first, to skip
+    a network round trip, and that was backwards: the wiki carries BASE
+    (+0) values that scale correctly to any owned +N, plus the class list,
+    the proc and the drop source. A hand-entered figure is pinned to the
+    one rank it was read at and cannot scale -- so preferring it would
+    have silently overridden better data forever, and eqlwiki is actively
+    filling in the launch item block (Burnt Sheer Blade gained a page
+    within two days of being unfindable).
+    """
+    try:
+        from backend import item_facts
+        rec = item_facts.stats_for(0, base)
+    except Exception:
+        return None
+    return rec[0] if rec else None
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -802,13 +810,40 @@ CLASS_GUIDES_DIR = bundle_path("class_guides")
 REF_GUIDES = ("races", "stances_invocations", "rituals")
 
 
-def class_guide_text(classes, max_chars_per: int = 2600,
+def guide_budget() -> int:
+    """Per-guide character budget, scaled to the context we actually have.
+
+    3200 was chosen to protect a model loaded at 8k. That is the floor,
+    not the norm: a local server reports its LOADED window and 32k is
+    common, where holding guides to 3200 discards most of what we could
+    say. Cloud providers stay at the floor deliberately -- their context
+    is ample but their tokens are billed, and nobody asked us to spend
+    four times as much per consult.
+
+    Scales with the window rather than jumping, and stops at 9000: past
+    that the guides would crowd out the gear and spell context they are
+    supposed to inform, and prompt size costs real latency (a 10k-token
+    prompt measured ~3.9s locally).
+    """
+    try:
+        from backend.llm_runtime import context_limit
+        info = context_limit()
+    except Exception:
+        return 3200
+    if info["source"] == "default":
+        return 3200
+    return max(3200, min(9000, int(info["limit"] * 0.18)))
+
+
+def class_guide_text(classes, max_chars_per: int | None = None,
                      include_refs: bool = False) -> str:
     """Curated .md guides (community wisdom, maintained by hand — see
     class_guides/README.md). general.md (cross-class mechanics + meta)
     loads FIRST for every trio, then reference files when include_refs,
     then one file per full class name (lowercase, spaces as
     underscores). Empty string when none exist."""
+    if max_chars_per is None:
+        max_chars_per = guide_budget()
     names = (["general"] + (list(REF_GUIDES) if include_refs else [])
              + [str(c).strip().lower().replace(" ", "_")
                 for c in classes or []])
@@ -824,6 +859,15 @@ def class_guide_text(classes, max_chars_per: int = 2600,
         except OSError:
             continue
         if txt:
+            # Why a cap at all, since it used to be a bare 2600 with no
+            # rationale: guides are the LARGEST single slice of the
+            # advisor prompt (13k chars of ~25k), and _lmstudio_budget in
+            # advisor.py subtracts the prompt from the model's LOADED
+            # context to size max_tokens. On a local model loaded at 8k
+            # the prompt is already tight, so this bounds it. 3200 fits
+            # the two densest guides after trimming rather than silently
+            # dropping their back half -- which is where the NEWEST
+            # material lives, since new notes get appended.
             cap = 3400 if nm in ("general",) + REF_GUIDES else max_chars_per
             title = ("General (all trios)" if nm == "general"
                      else nm.replace("_", " ").title())
@@ -981,12 +1025,24 @@ def _parse_zem_wikitext(text: str) -> dict:
         if section == "Planes" and zone not in IN_ERA_PLANES:
             continue
         cells = [c.strip() for c in rm.group(2).split("||")]
-        ztype = cells[0].strip().title() if cells else ""
+        # The Type cell is OPTIONAL in practice: 61 of 119 rows omit it,
+        # including the whole Faydark block (Crushbone, Kaladim, Felwithe,
+        # Butcherblock, Unrest, Kedge Keep, Steamfont, Mistmoore). Assigning
+        # by position therefore put a LEVEL RANGE in `type`, left lo/hi
+        # None, and shifted every quality circle one column left -- so
+        # Crushbone read as efficient at level 1 when its row says poor,
+        # and the City exclusion silently stopped applying to half the
+        # table. Detect which shape the row is instead of trusting order.
+        first = cells[0] if cells else ""
+        if _RE_ZEM_RANGE.search(first):
+            ztype, rest = "", cells          # no Type cell: range leads
+        else:
+            ztype, rest = first.title(), cells[1:]
         lo = hi = None
-        if len(cells) > 1 and (rng := _RE_ZEM_RANGE.search(cells[1])):
+        if rest and (rng := _RE_ZEM_RANGE.search(rest[0])):
             lo, hi = int(rng.group(1)), int(rng.group(2))
         tiers = {}
-        for lvl, cell in zip(cols, cells[2:]):
+        for lvl, cell in zip(cols, rest[1:]):
             t = _cell_tier(cell)
             if t:
                 tiers[lvl] = t
@@ -1171,12 +1227,22 @@ async def hunting_candidates(level: int) -> list:
             "at_level": quality != "stretch",
             "quality": quality,
             "note": note,
+            "type": z["type"] or "",
             "marks": [m for m in marked if m in (col, col + 5)],
             "levels": marked or [l for l in range(lo, (hi or lo) + 1)
                                  if l % 5 == 0 or l == lo],
         })
     order = {"efficient": 0, "ok": 1, "stretch": 2}
-    out.sort(key=lambda z: (order[z["quality"]],
-                            abs(((int(z["band"].split("-")[0])
-                                  + int(z["band"].split("-")[1])) // 2) - level)))
+    # Dungeons rank above open zones AT EQUAL QUALITY -- a tiebreak, never
+    # a filter. Filtering to Type == "Dungeon" is tempting and wrong: 15
+    # in-era rows carry NO Type at all (the sheet omits the cell), and
+    # Crushbone is one of them, so a hard dungeon filter drops the single
+    # zone most often wanted at this level. Quality still leads, because a
+    # dungeon you cannot efficiently kill in is not a better answer.
+    def _rank(z):
+        mid = (int(z["band"].split("-")[0]) + int(z["band"].split("-")[1])) // 2
+        return (order[z["quality"]],
+                0 if z.get("type") == "Dungeon" else 1,
+                abs(mid - level))
+    out.sort(key=_rank)
     return out
