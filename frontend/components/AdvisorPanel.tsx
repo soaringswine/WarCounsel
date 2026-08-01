@@ -34,10 +34,19 @@ const isCli = (p: string | undefined | null): p is CliProvider =>
   p === "claude_cli" || p === "codex_cli";
 
 /** Datalist SUGGESTIONS only — free text is always allowed, since both
- *  vendors ship new model ids faster than this list can chase them. */
+ *  vendors ship new model ids faster than this list can chase them. This
+ *  list WILL go stale (the codex half sat two generations behind until
+ *  2026-07-31); the model actually available is whatever the installed CLI
+ *  offers, so check there before trusting an entry here. Ordered strongest
+ *  to fastest within each vendor. */
 const CLI_MODEL_SUGGESTIONS: Record<CliProvider, string[]> = {
-  claude_cli: ["claude-opus-5", "claude-sonnet-5", "claude-fable-5", "haiku"],
-  codex_cli: ["gpt-5.1-codex-max", "gpt-5.1-codex", "gpt-5.1-codex-mini"],
+  claude_cli: ["claude-fable-5", "claude-opus-5", "claude-sonnet-5",
+               "claude-haiku-4-5"],
+  // gpt-5.6: sol "latest frontier", terra "balanced ... everyday work",
+  // luna "fast and affordable" (codex's own descriptions). sol/terra also
+  // accept an `ultra` effort that the effort <select> does not offer; luna
+  // tops out at max.
+  codex_cli: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
 };
 
 const CLI_SHORT: Record<CliProvider, string> = {
