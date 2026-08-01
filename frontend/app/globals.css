@@ -1829,6 +1829,43 @@ button.app-version:hover { color: var(--gold-bright); }
   color: var(--muted);
 }
 
+/* Ending a saved thread — pushed to the right of the hint so it never
+   sits under the cursor's path to the ask box. */
+.adv-chat-clear {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--hairline-dim);
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.adv-chat-clear:hover:not(:disabled) {
+  color: var(--dmg-in);
+  border-color: var(--dmg-in);
+}
+
+.adv-chat-clear:disabled { opacity: 0.5; cursor: default; }
+
+/* Pages a reply actually read. Live-turn only, so a reloaded thread shows
+   none — absence means "not recorded", never "answered from memory". */
+.adv-chat-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.adv-chat-source {
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border: 1px solid var(--hairline-dim);
+  padding: 1px 5px;
+}
+
 .adv-chat-log {
   max-height: 260px;
   overflow-y: auto;

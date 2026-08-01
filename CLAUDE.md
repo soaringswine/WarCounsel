@@ -433,10 +433,15 @@ throttled `state` pushes. REST highlights (see main.py for all):
 - `GET /api/events|encounters|chat/history` · `POST /api/chat` (the
   retired mock-data agent) · `POST /api/advisor/chat` — the GROUNDED
   chat seat in the Advisor tab: same briefing the consult used, plus the
-  counsel, the gear table's changed rows and any check findings, through
-  the active provider (`backend/agent/counsel_chat.py`). Works before a
-  consult too — the briefing renders wiki-less from live owned state.
-  History persists in the same per-character `chat_messages` table
+  counsel, the FULL gear table and any check findings, through the active
+  provider (`backend/agent/counsel_chat.py`), PLUS the equipment
+  consult's own briefing and live wiki lookups (both below). Works
+  before a consult too — the briefing renders
+  wiki-less from live owned state. History persists in the same
+  per-character `chat_messages` table; `DELETE /api/chat/history` ends
+  the thread for the ACTIVE character (the "clear thread" button — the
+  thread survives reloads and relaunches by design, so it needs an
+  explicit way out, and until 2026-07-31 it had none)
 - `GET /api/advisor` / `GET /api/gear` — LLM consults; `?refresh=1` forces,
   `?cached=1` returns the cache instantly or `{"cached": false}` WITHOUT
   running the LLM (the tab restores results on load; consults are
@@ -1104,6 +1109,73 @@ matching a level range means Type is absent.
 no Type at all and Crushbone is one of them, so a hard filter drops the
 zone most often wanted at that level. Dungeons outrank open zones at EQUAL
 quality instead — a tiebreak, never a gate.
+
+## The chat seat speaks for BOTH advisors
+
+`POST /api/advisor/chat` carries the counsel AND the equipment consult —
+both briefings and both displayed results — rather than growing a second
+chat box beside the gear table. A split seat would split the thread and
+send two half-informed prompts, and most real questions cross the line
+anyway ("is that AA worth it or should I farm the ring instead").
+
+- **Both `_prompt` briefings ride along.** The gear consult mines its own
+  (every owned item with wiki stats scaled to its +N, exaltation sockets
+  and destinations, the pet pool) and NONE of it is in the counsel's, so
+  before this the chat could see the gear table's verdicts but not one
+  number behind them. A DETERMINISTIC gear table stashes no briefing
+  (`generate_gear_advice`), so that case degrades to the digest alone.
+- **The gear digest is the WHOLE 24-slot roster, not just changed rows.**
+  Keeping only rows proposing a change hid two thirds of a table the
+  player was looking straight at — a kept row IS the answer to "why did
+  it leave my head alone". Kept rows are labelled so the model never
+  reads one as a suggestion.
+- **`_caps()` sizes every section to the model's context**, proportionally,
+  for `lmstudio`/`local` only — cloud and CLI providers keep the fixed
+  caps because `context_limit()` deliberately does not scale billed
+  tokens. The old fixed caps predated the gear half and already overflowed
+  an 8k window on their own.
+- The Equipment header's "ask about gear" button focuses this same input;
+  it does not open anything.
+
+## Counsel chat lookups (`backend/agent/chat_tools.py`)
+
+The chat's briefing is a SNAPSHOT of what the last consult gathered, so
+anything outside it came back as "nothing in your briefing lists that" —
+which reads as ignorance of the game rather than the edge of one cached
+prompt (live report: "where do I buy Shieldskin?"). The chat can now run
+a small set of named lookups mid-answer.
+
+- **Text protocol, not native tool-calling.** `get_llm()` is the seam
+  every provider shares and two of them (`claude_cli`, `codex_cli`) are
+  one-shot subprocesses with no tool channel at all, while LM Studio's
+  support varies per loaded model. So a lookup is one line, one string
+  argument, matched by a regex that tolerates bullets, blockquotes,
+  backticks and a stray `LOOKUP:` prefix. A model that ignores the
+  protocol gets exactly the old single-turn behaviour.
+- Tools: `wiki_search`, `wiki_page`, `wiki_category`, `spell` (eqlbuilds
+  record), `vendors` (the per-spell Where-to-Obtain table), `item`
+  (stats + acquisition), `aa`. All of them wrap helpers that already
+  existed — every one keeps its MCP-then-plain-HTTP fallback.
+- **eqlwiki's search is over TITLES, not article text.** "Cleric"
+  returns six pages; "Kelethin merchant" and "Spell Vendors" return
+  NOTHING. Measured 2026-07-31, identical through the MCP server and the
+  HTTP fallback, so it is the wiki and not the client. The prompt and the
+  empty-result message both say to retry with ONE distinctive word, and
+  `wiki_category` exists because categories are how this wiki is actually
+  navigable. A ZONE page is the best merchant source there is — the
+  Kelethin page maps every platform and what each merchant sells.
+- Caps: 2 lookup rounds, 4 lookups each, 2.4k chars per result, one 25s
+  timeout for a whole round. A lookup turn is protocol and is never shown
+  to the player; `strip_lookups()` also runs on the FINAL answer, and if
+  that empties it the model is re-asked WITHOUT the lookup rules so the
+  tab cannot break.
+- **These are not verification gates.** The house rule ("the LLM
+  proposes, structured data disposes") governs the CONSULT, whose picks
+  are machine-checked before display. A chat reply is prose. What lookups
+  buy is grounding — a cited page beats model memory of classic
+  EverQuest. The response carries `sources`, rendered as chips under the
+  reply; they are live-turn only, since `chat_messages` stores
+  (role, content) and a reloaded thread has none.
 
 ## Wiki grounding
 

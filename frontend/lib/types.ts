@@ -249,6 +249,9 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   suggestions?: Suggestions;
+  /** Wiki/eqlbuilds pages this reply looked up. Live-turn only — the
+   *  message table stores (role, content), so a reloaded thread has none. */
+  sources?: string[];
 }
 
 export type WsMessage =

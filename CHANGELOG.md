@@ -4,6 +4,36 @@ Notable changes per release. Check for updates by clicking the version badge
 in the app header; update by closing the companion and running
 `update_companion.bat`.
 
+## Unreleased
+
+**One chat now answers for the gear advisor too.** It could see which
+equipment rows proposed a change and nothing else — not the slots it left
+alone, and not one stat behind any of it, so "why did it keep my helm?"
+had no answer. It now holds the whole 24-slot table with its reasoning,
+plus the equipment consult's own briefing: every owned item's stats
+already scaled to its +N, your exaltation stones and where they can move,
+the pet pool. "ask about gear" in the Equipment header drops you into the
+same box — there is deliberately only one thread, since most questions
+cross the line between spells and gear anyway. If you run a local model,
+each part of the question is now sized to the context you actually have
+loaded instead of a fixed guess that could overflow it.
+
+**The counsel chat can read the wiki now.** It answered from one cached
+briefing, so anything the last consult had not already gathered came back
+as "nothing in your briefing lists that" — vendor locations, drop tables,
+zone pages, quests. It can now look things up mid-answer: wiki pages and
+categories, the eqlbuilds record for any spell, item stats and where they
+come from, AA costs. Ask where to buy a spell and it reads the zone page
+and tells you which platform sells what. Chips under each reply name the
+pages it actually read, so you can tell a grounded answer from a
+remembered one.
+
+**The chat thread can be ended.** It is saved per character and survives
+a reload and a relaunch — that is what lets "why that pick?" span
+sessions — but there was no way to clear one, so a conversation from days
+ago greeted every launch and rode into every new answer as history.
+"clear thread" beside the ask box deletes it, for that character only.
+
 ## v2.1.11 — 2026-07-30
 
 **Spell timers now account for the upgrade tier.** Upgrading a spell makes

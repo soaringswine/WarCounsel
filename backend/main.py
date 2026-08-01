@@ -1654,10 +1654,18 @@ async def advisor_chat(request: CounselChatRequest,
                 .filter(ChatMessageRow.character_id == _character_id)
                 .order_by(ChatMessageRow.id.desc()).limit(10).all())
         history = [{"role": r.role, "content": r.content} for r in reversed(rows)]
+    # The equipment consult mines its OWN briefing (owned items with wiki
+    # stats scaled to their +N, exalt sockets, pet pool) and none of it is
+    # in the counsel's. Passing both is what lets ONE chat seat answer for
+    # both advisors. A DETERMINISTIC gear table stashes no briefing (see
+    # generate_gear_advice) — the gear digest still goes through, so the
+    # chat sees the table's verdicts, just not the numbers under them.
+    gear_briefing = (_gear_cache or {}).get("_prompt") or ""
     from backend.agent.counsel_chat import answer
     try:
-        reply = await answer(msg, briefing, _advice_cache, _gear_cache,
-                             live, history)
+        reply, sources = await answer(msg, briefing, _advice_cache,
+                                      _gear_cache, live, history,
+                                      gear_briefing=gear_briefing)
     except Exception as e:
         logger.warning("Counsel chat failed: %.200s", str(e))
         raise HTTPException(502, f"chat failed: {str(e)[:300]}")
@@ -1668,7 +1676,12 @@ async def advisor_chat(request: CounselChatRequest,
                               content=reply))
         db.commit()
     return {"reply": reply, "model": model_for(prov), "provider": prov,
-            "grounded": bool((_advice_cache or {}).get("_prompt"))}
+            "grounded": bool((_advice_cache or {}).get("_prompt")),
+            # which pages the answer actually read — the chat's own version
+            # of the counsel's "wiki-grounded" chip. Not persisted: the
+            # message table is (role, content), and a source list is worth
+            # far less than the reply it annotates.
+            "sources": sources}
 
 
 @app.post("/api/gear/revise")
@@ -2314,6 +2327,26 @@ async def chat_history(limit: int = 40, db: Session = Depends(get_db)):
             .filter(ChatMessageRow.character_id == _character_id)
             .order_by(ChatMessageRow.id.desc()).limit(limit).all())
     return {"messages": [r.to_dict() for r in reversed(rows)]}
+
+
+@app.delete("/api/chat/history")
+async def chat_history_clear(db: Session = Depends(get_db)):
+    """Forget this character's chat thread.
+
+    The thread is per-character and persistent by design (it survives a
+    reload and a relaunch, which is what makes "why that pick?" work
+    across sessions) — but until now there was NO way to end one, so a
+    conversation from three days ago greeted every launch and rode into
+    every new answer as history. Deletes by character_id only; other
+    characters' threads are untouched.
+    """
+    if not _character_id:
+        return {"deleted": 0}
+    n = (db.query(ChatMessageRow)
+         .filter(ChatMessageRow.character_id == _character_id)
+         .delete(synchronize_session=False))
+    db.commit()
+    return {"deleted": n}
 
 
 @app.post("/api/chat")

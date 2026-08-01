@@ -302,6 +302,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const chatEnd = useRef<HTMLDivElement | null>(null);
+  const chatInput = useRef<HTMLInputElement | null>(null);
   const [dcDebug, setDcDebug] = useState(false);
   const [cliDraft, setCliDraft] = useState<
     Record<string, { model: string; effort: string }>
@@ -623,12 +624,40 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     setChatDraft("");
     setChatMsgs((m) => [...m, { role: "user", content: q }]);
     try {
-      const r = await apiSend<{ reply: string }>("/api/advisor/chat", { message: q });
-      setChatMsgs((m) => [...m, { role: "assistant", content: r.reply }]);
+      const r = await apiSend<{ reply: string; sources?: string[] }>(
+        "/api/advisor/chat", { message: q });
+      setChatMsgs((m) => [
+        ...m,
+        { role: "assistant", content: r.reply, sources: r.sources },
+      ]);
     } catch (err) {
       setChatError(unwrapApiError(err));
     } finally {
       setChatBusy(false);
+    }
+  };
+
+  // One chat seat answers for BOTH advisors — it holds the counsel and the
+  // gear table plus both of their briefings — so the Equipment section
+  // routes here instead of growing a second box that would split the
+  // thread and send two half-informed prompts.
+  const askAboutGear = () => {
+    chatInput.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    chatInput.current?.focus();
+  };
+
+  // The thread is per-character and persists across reloads and relaunches
+  // on purpose — that is what lets "why that pick?" span sessions — so
+  // ending one has to be an explicit act. Clears the server's copy too;
+  // wiping only the panel would resurrect the thread on the next load AND
+  // keep feeding it to the model as history.
+  const clearChat = async () => {
+    try {
+      await apiSend<{ deleted: number }>("/api/chat/history", {}, "DELETE");
+      setChatMsgs([]);
+      setChatError(null);
+    } catch (err) {
+      setChatError(unwrapApiError(err));
     }
   };
 
@@ -928,10 +957,21 @@ export const AdvisorPanel = memo(function AdvisorPanel({
           <div className="adv-chat-head">
             <span className="adv-sub">Ask the counsel</span>
             <span className="adv-chat-hint">
-              {advice
-                ? "grounded in this counsel, your gear table, and the check findings"
-                : "grounded in your owned spells, gear and class guides — consult for more"}
+              {advice || gear
+                ? "spells, AAs and equipment — it holds both consults, their briefings and the check findings, and it can read the wiki"
+                : "spells, AAs and equipment — grounded in your owned spells, gear and class guides, and it can read the wiki"}
             </span>
+            {chatMsgs.length > 0 && (
+              <button
+                type="button"
+                className="adv-chat-clear"
+                onClick={clearChat}
+                disabled={chatBusy}
+                title="Delete this character's saved thread. It persists across reloads and relaunches, and rides into every new answer as history, until you clear it."
+              >
+                clear thread
+              </button>
+            )}
           </div>
           {chatMsgs.length > 0 && (
             <div className="adv-chat-log">
@@ -941,6 +981,13 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                     {m.role === "user" ? "you" : "counsel"}
                   </span>
                   <div>{chatText(m.content)}</div>
+                  {(m.sources?.length ?? 0) > 0 && (
+                    <div className="adv-chat-sources">
+                      {m.sources!.map((s) => (
+                        <span key={s} className="adv-chat-source">{s}</span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
               <div ref={chatEnd} />
@@ -948,13 +995,14 @@ export const AdvisorPanel = memo(function AdvisorPanel({
           )}
           <form className="adv-chat-form" onSubmit={askCounsel}>
             <input
+              ref={chatInput}
               type="text"
               value={chatDraft}
               onChange={(e) => setChatDraft(e.target.value)}
               placeholder={
                 advice
-                  ? "why that pick? what should I buy next? is Leech worth it at 9?"
-                  : "ask about your spells, gear, or where to hunt…"
+                  ? "why that pick? where do I buy Shieldskin? is Leech worth it at 9?"
+                  : "ask about your spells, gear, where to hunt, where to buy…"
               }
               aria-label="Ask the counsel"
               disabled={chatBusy}
@@ -1458,6 +1506,14 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                   title="Best owned item per slot + farming targets (first run mines item stats from the wiki — slow)"
                 >
                   {gearLoading ? "consulting…" : gear ? "re-consult gear" : "consult gear"}
+                </button>
+                <button
+                  type="button"
+                  className="adv-rescan adv-gear-btn"
+                  onClick={askAboutGear}
+                  title="Ask the counsel about this table — the same chat seat holds your gear briefing, every slot row and the check findings, so it answers equipment questions directly"
+                >
+                  ask about gear
                 </button>
               </h3>
               {gearLoading && (
