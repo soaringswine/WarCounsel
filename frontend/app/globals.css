@@ -2695,3 +2695,56 @@ button.app-version:hover { color: var(--gold-bright); }
   font-size: 10.5px;
   color: var(--muted, rgba(226, 222, 214, .55));
 }
+
+/* Buff stacking, said out loud. EQ overwrites silently and the only other
+   way to learn it is casting both and watching one drop. */
+.adv-stack { font-size: 10.5px; }
+.adv-stack[data-kind="lose"] { color: #d4574a; }
+.adv-stack[data-kind="win"] { color: var(--muted, rgba(226, 222, 214, .6)); }
+
+/* Focus, beside the Consult button it steers. */
+.adv-focus {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted, rgba(226, 222, 214, .62));
+}
+.adv-focus select { font: inherit; font-size: 11px; }
+
+/* "screen" tag on a vital the stats OCR supplies, so a read value is never
+   mistaken for one the player typed and forgot to update. */
+.vitals-src {
+  margin-left: 5px;
+  padding: 0 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: #1fb38c;
+  border: 1px solid rgba(31, 179, 140, .4);
+}
+
+/* How long a pre-buff lasts. "until death" is the one worth spotting: it
+   is cast once and never refreshed, so it should not read like a chore. */
+.adv-dur { font-size: 10.5px; color: var(--muted, rgba(226, 222, 214, .6)); }
+.adv-dur[data-kind="perm"] { color: #1fb38c; }
+
+/* Trio pickers, demoted. /who and class inference set the trio now, so
+   these are for planning a trio you are NOT playing — present, quiet, and
+   not competing with live data. */
+.adv-trio { font-size: 11px; }
+.adv-trio > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 2px 0;
+  color: var(--gold, #c8aa6e);
+}
+.adv-trio > summary::-webkit-details-marker { display: none; }
+.adv-trio > summary::before { content: "▸ "; color: var(--muted, rgba(226,222,214,.5)); }
+.adv-trio[open] > summary::before { content: "▾ "; }
+.adv-trio-fields { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 0 2px; }
+
+/* An explicit display on a <details> child defeats the browser's own
+   hiding of closed content, so the pickers stayed on screen while the
+   toggle read closed. Hide them explicitly. */
+.adv-trio:not([open]) .adv-trio-fields { display: none; }

@@ -34,6 +34,48 @@ sessions — but there was no way to clear one, so a conversation from days
 ago greeted every launch and rode into every new answer as history.
 "clear thread" beside the ask box deletes it, for that character only.
 
+## v2.5.0 — 2026-08-03
+
+**Spell picks now use what your log says your spells actually do.** The
+advisor was choosing from spell level and name alone, which is how it made
+Smite a primary nuke while Careless Lightning was hitting five times harder
+in the same fights. Your encounters already recorded per-ability damage;
+that goes into the consult now.
+
+**Pre-buffs rebuilt.** The section listed permanent buffs reasoned as
+"Permanent buff." and little else, because the prompt only ever sent
+names. Buffs now carry their effects and duration, the long defensive ones
+you would actually re-cast between pulls are guaranteed a place, and
+anything a buff you own overwrites is removed rather than listed and
+crossed out. Invisibility and camouflage are no longer treated as
+pre-buffs — you cast those for a pull, not as part of buffing up.
+
+**No pet, no pet spells.** A Paladin/Druid/Monk was being told to slot pet
+haste and pet shrink. None of those classes summons anything, so those
+gems were dead.
+
+**Upgrade warnings point at what you can cast today**, and say what comes
+next with its level, instead of naming a rung you passed ten levels ago.
+
+**Consults stopped failing on local reasoning models.** They spend their
+thinking against the same budget as the answer, and the budget was too
+small — one run used 5,997 of 6,000 tokens deliberating and never
+answered. It is now sized from the real context window, and when a reply
+is cut short the message says so instead of blaming the parser.
+
+**The gear consult no longer waits on the spell consult.** They read
+different data and the gear one was unreachable until the other had run.
+
+**Also**
+
+- Focus moved next to the Consult button it steers; the trio pickers fold
+  away, since /who sets the trio now
+- Max HP and mana say when the screen supplied them
+- The horizon looks five levels ahead, and the heading says so
+- "Nice to have" no longer repeats spells already in a slot
+- The vendor shopping list is gone — the in-game find tool is better at it
+- The tab icon is back, and the OCR boxes are documented in the README
+
 ## v2.4.0 — 2026-08-02
 
 **Melee loadouts, measured from your own fights.** A new section in the gear

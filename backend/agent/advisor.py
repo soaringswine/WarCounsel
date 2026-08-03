@@ -7,7 +7,7 @@ spell slots) + the /outputfile spellbook (what the character actually OWNS)
   loadout      what to memorize right now (fills the spell slots, owned only)
   replace      spells in use that a better spell supersedes
   aa_now/save  AA purchase order vs savings goal
-  horizon      significant unlocks in the NEXT 2 LEVELS + prep for them
+  horizon      significant unlocks in the NEXT 5 LEVELS + prep for them
   locations    where to hunt for this level/trio (+ notable paired drops)
   class_notes  weapon-skill / exaltation guidance per class
 
@@ -75,14 +75,14 @@ Rules:
   - must_have: the core spells that should always be memorized, in priority order (typically 5-7).
   - should_have: fills the REMAINING slots, in priority order — must_have + should_have together must total EXACTLY __SLOTS_NOTE__ picks.
   - nice_to_have: 10-14 EXTRA alternatives beyond the slot count, in priority order, so the player can swap by situation (different zone, tougher pulls, low mana).
-- prebuffs: separate from the loadout — list PERMANENT buffs (marked in the character data) FIRST: they persist until death, are cast exactly once, and must never be described as needing refreshing. Then long-duration self-buffs worth keeping up (damage shields like Bramblecoat, AC/HP buffs, Spirit of Wolf). The player memorizes one temporarily, casts it, then swaps the slot back to combat spells — so do NOT waste loadout slots on long buffs; put them here. Owned and level-legal only.
-- Summoned-pet lines (skeletons, elementals, warders): only ever slot the HIGHEST-level pet the character owns — older ranks are strictly weaker versions of the same pet.
+- prebuffs: every entry's reason must say WHAT IT DOES and why it matters for this focus, using the effect shown beside it — "Permanent buff." is not a reason. Include long buffs worth re-casting between pulls, not only permanent ones. Separate from the loadout — list PERMANENT buffs (marked in the character data) FIRST: they persist until death, are cast exactly once, and must never be described as needing refreshing. Then long-duration self-buffs worth keeping up (damage shields like Bramblecoat, AC/HP buffs, Spirit of Wolf). The player memorizes one temporarily, casts it, then swaps the slot back to combat spells — so do NOT waste loadout slots on long buffs; put them here. Owned and level-legal only.
+- If the character data says NO PET, never recommend pet spells of any kind — no pet haste, no shrink, no pet heals, no pet buffs. They target a pet slot that will be empty. Summoned-pet lines (skeletons, elementals, warders): only ever slot the HIGHEST-level pet the character owns — older ranks are strictly weaker versions of the same pet.
 - Respect the focus STRICTLY: for solo focuses, never slot group-only utility — resurrection and corpse-recovery lines, buffs that can only target others — those are dead slots when playing alone.
 - If a "Missing spells they could BUY" list is present, fold the best purchases into note or horizon (say they are vendor purchases).
-- replace: ONLY same-spell-line pairs — the upgrade must do the same job with the same primary effect (Symbol of Transal -> Symbol of Ryltan; Minor Healing -> Healing). A teleport, utility, or AA ability is NEVER upgraded by a nuke or an unrelated spell. Cover: recently-cast spells superseded by a better OWNED spell, and owned loadout spells with a significant same-line upgrade within 2 levels (say the level). Omit any pair you are not sure about; every pair is machine-verified and wrong ones are discarded.
+- replace: ONLY same-spell-line pairs — the upgrade must do the same job with the same primary effect (Symbol of Transal -> Symbol of Ryltan; Minor Healing -> Healing). A teleport, utility, or AA ability is NEVER upgraded by a nuke or an unrelated spell. Cover: recently-cast spells superseded by a better OWNED spell, and owned loadout spells with a significant same-line upgrade within 5 levels (say the level). Omit any pair you are not sure about; every pair is machine-verified and wrong ones are discarded.
 - aa_now: what to buy right now with the available points (use the per-rank costs in the data). Owned AA ranks are __AA_RANKS_NOTE__ — state assumptions briefly.
 - aa_save: 1-3 savings goals, especially anything that preps for the horizon items.
-- horizon: the significant spells/abilities arriving within the NEXT 2 LEVELS for any of the three classes (exact level from the tables), plus any AA worth buying in advance for them.
+- horizon: the significant spells/abilities arriving within the NEXT 5 LEVELS for any of the three classes (exact level from the tables), plus any AA worth buying in advance for them.
 - locations: 2-4 hunting spots for the level and focus. When a "Hunting grounds" list is present in the character data, choose ONLY zones from that list, using its exact names — never a city, never a zone outside the list (picks outside it are machine-discarded). Prefer spots whose band centers on the level over ones they are outgrowing; where you know a notable drop that pairs with this trio, name it in "notable" (else use "").
 - class_notes: one entry per class with practical guidance — for melee: which weapon skill to run right now (e.g. fists vs 1H Blunt for a Monk) and exaltations/disciplines if known. Mark uncertainty plainly when the data above does not cover it; never invent numbers.
 - sa_songs: ONLY when the trio includes a Bard (else []): the 1-4 songs FROM YOUR LOADOUT PICKS that Symphonic Aura should auto-pulse DURING COMBAT, most important first. Mechanics: SA pulses one eligible song per owned rank — eligible means zero mana, no cooldown, non-targeted — scanning from the FINAL spell gem BACKWARDS, and the player cannot twist them manually while SA holds them. Pick combat value (melee buffs, haste, regen); never a travel song — Selo's in an SA slot wastes a pulse mid-fight. GEM PLACEMENT IS NOT YOUR JOB: the app writes the in-game set deterministically (damage stack first, then your sa_songs sunk to the very last gems, most important in the final gem), and the must_have/should_have lists are PRIORITY order, not gem order — never describe gem positions in reasons.
@@ -155,11 +155,28 @@ def _build_prompt(ctx: dict, wiki: str) -> str:
     casts = ctx.get("recent_casts") or []
     lines.append("- Recently cast (live log, newest first): "
                  + (", ".join(casts) if casts else "none seen"))
+    if ctx.get("_no_pet"):
+        lines.append("- NO PET: none of these classes summons one, so every "
+                     "pet-targeted spell is dead weight in the loadout.")
+    meas = ctx.get("_measured") or []
+    if meas:
+        lines.append("- MEASURED from this character's own combat log "
+                     "(recent fights; avg per hit, then total): "
+                     + "; ".join(meas)
+                     + ". Prefer what is actually performing over what looks "
+                       "strong on paper.")
     perm = ctx.get("_permanent") or []
     if perm:
+        described = [f"{n} ({e})" if (e := _buff_effects(n)) else n for n in perm]
         lines.append("- PERMANENT buffs owned (last until death — cast ONCE "
                      "after login/death, NEVER tell the user to refresh them, "
-                     "never spend a combat slot on them): " + ", ".join(perm))
+                     "never spend a combat slot on them): "
+                     + ", ".join(described))
+    longb = ctx.get("_long_buffs") or []
+    if longb:
+        lines.append("- LONG buffs owned and castable now, worth re-casting "
+                     "between pulls (duration and effect shown): "
+                     + ", ".join(longb))
     hunt = ctx.get("_hunting") or []
     if hunt:
         def fmt(c):
@@ -228,19 +245,20 @@ def _lmstudio_budget(prompt_chars: int) -> int:
     if llm_active()["provider"] != "lmstudio":
         return 0  # frontier/other providers: no bind — their defaults are fine
     try:
-        import urllib.request
-        base = settings.lmstudio_base_url.rsplit("/v1", 1)[0]
-        with urllib.request.urlopen(base + "/api/v0/models", timeout=3) as r:
-            models = json.loads(r.read()).get("data", [])
-        ctx = next((m.get("loaded_context_length") for m in models
-                    if m.get("state") == "loaded"
-                    and m.get("loaded_context_length")), None)
-        if not ctx:
-            return 6000
-        est_prompt = prompt_chars // 3 + 200  # ~3 chars/token, safety pad
-        return max(1200, min(12000, int(ctx) - est_prompt - 256))
+        from backend.llm_runtime import context_limit
+        ctx = int((context_limit() or {}).get("limit") or 0)
     except Exception:
+        ctx = 0
+    if not ctx:
         return 6000
+    est_prompt = prompt_chars // 3 + 200  # ~3 chars/token, safety pad
+    # Ceiling raised from 12000, and the rest of the window is offered. A
+    # REASONING model spends its thinking against this same budget: one run
+    # burned 5,997 reasoning tokens out of 6,000 and was cut off
+    # mid-deliberation with an empty content field, which surfaced as "no
+    # JSON in reply" -- a parsing complaint about a model that never got as
+    # far as answering.
+    return max(1200, min(24000, ctx - est_prompt - 256))
 
 
 def _reply_text(response: Any) -> str:
@@ -270,6 +288,36 @@ def _reply_text(response: Any) -> str:
             if isinstance(val, str) and val.strip():
                 out.append(val)
     return chr(10).join(p for p in out if p)
+
+
+def _no_json_reason(response: Any, raw: str) -> str:
+    """Why there was no JSON, in terms the player can act on.
+
+    "no JSON object in LLM reply (0 chars of text seen)" reads as a parser
+    fault. The case actually seen was a reasoning model that spent its whole
+    completion budget thinking -- 5,997 reasoning tokens of 6,000,
+    finish_reason "length", content empty. It never reached the answer, and
+    a complaint about missing JSON sends the reader looking in the wrong
+    place entirely.
+    """
+    meta = getattr(response, "response_metadata", None) or {}
+    finish = meta.get("finish_reason") or meta.get("stop_reason")
+    usage = (meta.get("token_usage") or meta.get("usage")
+             or getattr(response, "usage_metadata", None) or {})
+    reasoning = 0
+    if isinstance(usage, dict):
+        det = usage.get("completion_tokens_details") or {}
+        reasoning = (det.get("reasoning_tokens")
+                     or usage.get("reasoning_tokens") or 0)
+    if finish == "length":
+        if reasoning:
+            return (f"the model spent its whole reply budget thinking "
+                    f"({reasoning} reasoning tokens) and never answered. "
+                    "Raise the context limit in Settings, or pick a model "
+                    "that does not think out loud.")
+        return ("the reply was cut off before it finished — raise the "
+                "context limit in Settings.")
+    return f"no JSON object in LLM reply ({len(raw)} chars of text seen)"
 
 
 def _extract_json(text: str) -> Optional[dict]:
@@ -314,6 +362,82 @@ def _fallback_body(ctx: dict, reason: str) -> dict:
 # summons (32), pets (33/71), feign death (74), resurrection (81)
 _NOT_PERM_SPAS = {26, 32, 33, 71, 74, 81, 83, 88, 104}
 _SELF_TARGET = 6
+# Effects that are never a pre-buff even when they last a while. 67 is the
+# remote eye (Eye of Zomm) -- it summons something that flies off and does
+# nothing to the caster, so there is nothing to pre-cast.
+# 12 is invisibility and 28 is invisibility-versus-undead. They last a
+# long time and land on you, so every structural test for a buff passes --
+# but you cast them for a specific pull, not as part of buffing up, and
+# they were crowding the real buffs out of the list.
+_NOT_A_BUFF_SPAS = _NOT_PERM_SPAS | {67, 12, 28}
+
+
+# How far ahead the horizon looks. The wiki/builds context already spans
+# level+12, so this is a presentation window, not a data limit.
+HORIZON_LEVELS = 5
+
+
+# Effects that are noise in a one-line buff summary: zero-magnitude
+# charisma spacers pad almost every record, and the illusion id is a form
+# number rather than a stat.
+_BUFF_NOISE = {"Charisma", "Illusion", "Evacuate"}
+
+
+def _buff_effects(name: str) -> str:
+    """A one-line "what it actually does", from the spell record.
+
+    The prompt used to hand over bare NAMES, which is why every pre-buff
+    came back reasoned as "Permanent buff." -- the model had nothing else
+    to say about them. It cannot describe an effect it was never shown.
+    """
+    from backend import builds_data
+    e = builds_data.spell_entry(name)
+    if not e:
+        return ""
+    parts = []
+    for eff in (e.get("effects") or []):
+        label = (eff.get("name") or "").strip()
+        base = eff.get("baseValue")
+        if not label or label in _BUFF_NOISE or not base:
+            continue
+        # damage shields carry a negative base; it is a positive thing
+        parts.append(f"{label} {abs(int(base))}")
+        if len(parts) >= 3:
+            break
+    return ", ".join(dict.fromkeys(parts))
+
+
+def _long_buffs(ctx: dict) -> List[str]:
+    """Owned, castable buffs that last long enough to be worth pre-casting.
+
+    Permanent buffs were the only thing the prompt listed, so they were the
+    only thing that came back -- five rows of "until death" and nothing a
+    player would actually re-cast between pulls. A 27-minute AC buff is the
+    other half of a pre-buff routine and was never mentioned.
+    """
+    from backend import builds_data
+    from backend.game_data import _primary_effect
+    level = ctx.get("level")
+    perm = {n.lower() for n in (ctx.get("_permanent") or [])}
+    out = []
+    for sp in (ctx.get("spellbook") or {}).get("castable", []):
+        if level is not None and sp["level"] > level:
+            continue
+        if sp["name"].lower() in perm:
+            continue
+        e = builds_data.spell_entry(sp["name"])
+        if not e:
+            continue
+        ticks = e.get("durationTicks") or 0
+        if ticks < 100:          # under ~10 minutes: not worth a pre-cast
+            continue
+        pe = _primary_effect(e)
+        if pe and pe[0] in _NOT_A_BUFF_SPAS:
+            continue
+        eff = _buff_effects(sp["name"])
+        out.append(f"{sp['name']} ({round(ticks * 6 / 60)}min"
+                   + (f", {eff}" if eff else "") + ")")
+    return out[:12]
 
 
 def _permanent_buffs(ctx: dict) -> List[str]:
@@ -627,18 +751,21 @@ async def _compose_builtin(ctx, bycat, replaced, grounded_any,
     for cat in ("damage", "heal", "control", "other"):
         for i in (bycat.get(cat) or [])[:3]:
             nice.append(entry(i, f"alternative {cat} spell"))
-    prebuffs = [entry(i, "positive-effect buff — cast it, then swap the slot "
-                         "back to combat spells")
+    # The deterministic path had the same empty-reason problem as the LLM
+    # one: "positive-effect buff" on every row says nothing about which to
+    # cast. The effects are in the spell record either way.
+    prebuffs = [entry(i, (_buff_effects(i["name"]) or "positive-effect buff")
+                      + " — cast it, then swap the slot back to combat spells")
                 for i in (bycat.get("buff") or [])[:6]]
     horizon = []
     if level is not None:
         for s in book.get("castable", []):
-            if level < s["level"] <= level + 2:
+            if level < s["level"] <= level + HORIZON_LEVELS:
                 horizon.append({"level": s["level"], "cls": "",
                                 "name": s["name"],
                                 "reason": "already scribed — usable on level-up"})
         for s in (ctx.get("missing_spells") or []):
-            if level < s["level"] <= level + 2:
+            if level < s["level"] <= level + HORIZON_LEVELS:
                 horizon.append({"level": s["level"], "cls": "",
                                 "name": s["name"],
                                 "reason": "missing — vendor purchase"})
@@ -660,6 +787,10 @@ async def _compose_builtin(ctx, bycat, replaced, grounded_any,
                          "Recommended-Levels table.", "notable": ""}
                  for c in (ctx.get("_hunting") or [])
                  if c.get("at_level")][:3]
+    # same rule as the LLM path: an alternative already sitting in a slot
+    # is not an alternative
+    _slotted = {str(x.get("name")).lower() for x in must + should}
+    nice = [x for x in nice if str(x.get("name")).lower() not in _slotted]
     return {
         "source": "builtin",
         "grounding": "wiki" if grounded_any else "memory",
@@ -1291,6 +1422,12 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
         except Exception:
             ctx["_hunting"] = []
         ctx["_permanent"] = _permanent_buffs(ctx)
+        ctx["_long_buffs"] = _long_buffs(ctx)
+        ctx["_no_pet"] = not _summons_a_pet(classes)
+        ctx["_measured"] = _measured_damage(ctx)
+        # `reply_json is None` guards the REVISION path: a revision already
+        # has its reply and must re-enter the gates, never divert into the
+        # deterministic body just because the provider went to "none".
         if reply_json is None and llm_active()["provider"] == "none":
             body = await _builtin_counsel(ctx)
             base["grounding"] = body.pop("grounding", "memory")
@@ -1356,9 +1493,9 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
             raw = _reply_text(response)
             data = _extract_json(raw)
             if not data:
-                raise ValueError(
-                    "no JSON object in LLM reply "
-                    f"({len(raw)} chars of text seen)")
+                # stays INSIDE the else: on the revision path there is no
+                # `response` to read, and `data` is already the reply.
+                raise ValueError(_no_json_reason(response, raw))
         solo = (ctx.get("playstyle") or "").startswith("solo")
         usable = ([s["name"] for s in book["castable"]
                    if s["level"] <= ctx["level"]]
@@ -1408,15 +1545,15 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
                 out.append(s)
             return out
 
-        must_have = await _gate_picks(
+        must_have = _gate_pet_spells(await _gate_picks(
             _clean_list(data.get("must_have"), ("name", "cls", "reason"), cap=10),
-            "must_have")
-        should_have = await _gate_picks(
+            "must_have"), classes)
+        should_have = _gate_pet_spells(await _gate_picks(
             _clean_list(data.get("should_have"), ("name", "cls", "reason"), cap=14),
-            "should_have")
-        nice_to_have = await _gate_picks(
+            "should_have"), classes)
+        nice_to_have = _gate_pet_spells(await _gate_picks(
             _clean_list(data.get("nice_to_have"), ("name", "cls", "reason"), cap=16),
-            "nice_to_have")
+            "nice_to_have"), classes)
         # Buff SLOTS: drop picks that would overwrite each other. Run across
         # must_have + should_have together (they are one slot fill) and
         # BEFORE the promote step, so a freed gem refills from alternatives.
@@ -1437,6 +1574,15 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
                          not in {str(y["name"]).lower()
                                  for y in must_have + should_have}]
             should_have.extend(_promoted)
+        # Top up the alternatives BEFORE promoting from them. The backfill
+        # used to run afterwards, so when a gate emptied nice_to_have there
+        # was nothing left to promote and the loadout came back a slot
+        # short -- 13 of 14, with the shortfall unexplained.
+        if len(nice_to_have) < 12:
+            _picked = {p.get("name") for p in
+                       must_have + should_have + nice_to_have}
+            nice_to_have = nice_to_have + await _extra_alternatives(
+                ctx, _picked, 12 - len(nice_to_have))
         # auto-promote: gates may have removed picks — refill the slots from
         # the nice-to-have alternatives (they passed the same gates)
         slots_n = ctx.get("spell_slots")
@@ -1450,6 +1596,14 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
                 promoted = {**promoted,
                             "reason": "(promoted alternative) " + str(promoted.get("reason", ""))}
                 should_have.append(promoted)
+        # An "alternative" you have already been told to memorize is not an
+        # alternative. Duplicates arrive two ways: the model lists a spell
+        # in both tiers, and the promote step moves one from here into
+        # should_have. Filtered once, at the end, after both have happened.
+        _slotted = {str(x.get("name")).lower()
+                    for x in must_have + should_have}
+        nice_to_have = [x for x in nice_to_have
+                        if str(x.get("name")).lower() not in _slotted]
         # annotate every pick with its spellbook level (deterministic)
         level_by_name = {s["name"].lower(): s["level"]
                          for s in (book["castable"] if book else [])}
@@ -1457,9 +1611,9 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
             for s in lst:
                 s["level"] = level_by_name.get(str(s["name"]).lower())
         loadout = must_have + should_have  # combined = the actual slot fill
-        prebuffs = await _gate_picks(
+        prebuffs = _describe_prebuffs(_annotate_stacking(_gate_pet_spells(_backfill_prebuffs(_gate_prebuffs(await _gate_picks(
             _clean_list(data.get("prebuffs"), ("name", "cls", "reason"), cap=8),
-            "prebuffs")
+            "prebuffs")), ctx), classes), ctx))
         # Long-duration buffs are the worst place to stack two of a slot: the
         # second cast silently wastes the first one's mana and duration.
         prebuffs, _pre_clashes = _gate_stacking(prebuffs)
@@ -1477,6 +1631,18 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
                         and not await is_travel_ritual(p["using"])
                         and not await is_travel_ritual(p["upgrade"])
                         and await same_spell_line(p["using"], p["upgrade"])):
+                    # Point the pair at the best thing they can cast NOW,
+                    # not merely at something better than what they named,
+                    # and drop it entirely when they are already on it.
+                    path = _upgrade_path(p["using"], ctx)
+                    if path:
+                        if path["at_best"]:
+                            logger.info("Dropped replace pair: already on the "
+                                        "best owned %s", p["using"])
+                            continue
+                        p["upgrade"] = path["best"]
+                        p["next"] = path["next"]
+                        p["next_level"] = path["next_level"]
                     verified.append(p)
                 else:
                     logger.info("Dropped unverified replace pair: %s -> %s",
@@ -1701,6 +1867,297 @@ def _effective_vecs(cand: dict, worn: dict, ctx: dict) -> tuple:
             if v > 0:
                 vec[key] = max(0.0, min(cap, base + v) - base)
     return c, w
+
+
+def _upgrade_path(using: str, ctx: dict) -> Optional[dict]:
+    """Where a spell sits in its line, and what is actually next.
+
+    An upgrade warning is only useful if it points at the best thing you
+    can cast TODAY. Reported at level 25: "Minor Healing -> Light Healing",
+    while Healing -- two steps further up the same line and long since
+    scribed -- sat in the book. The pair was verified as a real same-line
+    upgrade and was still nearly useless, because nothing checked whether
+    the player was already past BOTH ends of it.
+
+    Returns the best owned-and-castable spell in the line, and the next one
+    beyond it with the level it unlocks at, so the warning can say where
+    you are and where you are going.
+    """
+    from backend import spell_lines
+    book = ctx.get("spellbook") or {}
+    level = ctx.get("level")
+    castable = book.get("castable") or []
+    if not castable or not spell_lines.known(using):
+        return None
+    lvl_of = {s["name"].strip().lower(): s.get("level") for s in castable}
+    slots = spell_lines.slots_for(using) or {}
+    best = best_pos = best_line = None
+    nxt = nxt_pos = nxt_level = None
+    for line, _pos in slots.items():
+        for cand in spell_lines.line_for(using, line):
+            key = cand.strip().lower()
+            if key not in lvl_of:
+                continue  # not owned at all
+            cl = lvl_of[key]
+            here = spell_lines.slots_for(cand).get(line)
+            if here is None:
+                continue
+            if level is not None and cl is not None and cl > level:
+                # owned but not yet castable -- this is the "next" rung
+                if nxt_pos is None or here < nxt_pos:
+                    nxt, nxt_pos, nxt_level = cand, here, cl
+                continue
+            if best_pos is None or here > best_pos:
+                best, best_pos, best_line = cand, here, line
+    if best is None:
+        return None
+    return {"best": best, "next": nxt, "next_level": nxt_level,
+            "at_best": best.strip().lower() == using.strip().lower()}
+
+
+def _effect_shape(name: str):
+    """The set of effects a buff actually applies, with its lead magnitude.
+
+    Used only where the curated line table has no entry. That table is
+    partial by design -- Protection of Rock is absent from it entirely --
+    and two buffs applying the SAME set of effects to the same target are
+    occupying the same slot whether or not anyone wrote it down. Reported
+    from the game: casting Skin like Steel overwrites Protection of Rock,
+    and both carry exactly effects 1, 69 and 79.
+
+    Requires two or more effects: a single shared effect is common enough
+    to be coincidence, and a wrong drop is worse than a missed note.
+    """
+    from backend import builds_data
+    from backend.game_data import _primary_effect
+    e = builds_data.spell_entry(name)
+    if not e:
+        return None
+    ids = frozenset(x.get("effectId") for x in (e.get("effects") or [])
+                    if x.get("baseValue"))
+    if len(ids) < 2:
+        return None
+    pe = _primary_effect(e)
+    return ids, abs((pe[1] if pe else 0) or 0)
+
+
+def _annotate_stacking(picks: list, ctx: dict) -> list:
+    """Say which buffs share a slot, and which of them wins.
+
+    EQ buffs occupy effect slots and two spells in one slot overwrite each
+    other -- Courage and Center are the same ac-slot-1, so casting both
+    wastes the first. Nothing in game says so; you find out by casting them
+    and watching one drop. The stacking data is already vendored and
+    already used to GATE the loadout, so the only thing missing was saying
+    it out loud.
+
+    Also names the strongest thing in the same slot the player owns, which
+    is how a druid buff quietly outranking a paladin one becomes visible.
+    """
+    from backend import spell_lines
+    book = ctx.get("spellbook") or {}
+    level = ctx.get("level")
+    owned = [b["name"] for b in book.get("castable", [])
+             if level is None or b.get("level", 0) <= level]
+    for p in picks:
+        name = p.get("name") or ""
+        slots = spell_lines.slots_for(name) or {}
+        if not slots:
+            continue
+        beaten_by = [o for o in owned
+                     if o.lower() != name.lower() and spell_lines.supersedes(o, name)]
+        overwrites = [o for o in owned
+                      if o.lower() != name.lower() and spell_lines.supersedes(name, o)]
+        if beaten_by:
+            p["superseded_by"] = beaten_by[0]
+            p["_drop"] = True
+        if overwrites:
+            p["overwrites"] = sorted(overwrites)[:3]
+    # A buff the player ALREADY OWNS a strict upgrade for is not a
+    # recommendation, it is a distraction. Showing it dimmed with "skip
+    # this one" beside it was reported as the list still carrying a
+    # deprecated spell -- which is exactly what it was. The `overwrites`
+    # note on the survivor still says what it replaced, so nothing is lost.
+    # Fallback for spells the line table does not carry: identical effect
+    # sets on two picks means one overwrites the other, and the larger lead
+    # magnitude wins. Only among the picks themselves -- this is a note
+    # about a list the player is about to cast, not a claim about the game.
+    shapes = {}
+    for p in picks:
+        if p.get("_drop") or p.get("superseded_by"):
+            continue
+        sh = _effect_shape(p.get("name") or "")
+        if not sh:
+            continue
+        ids, mag = sh
+        prev = shapes.get(ids)
+        if prev is None:
+            shapes[ids] = (mag, p)
+            continue
+        keep, drop = (prev[1], p) if prev[0] >= mag else (p, prev[1])
+        shapes[ids] = (max(prev[0], mag), keep)
+        drop["_drop"] = True
+        keep.setdefault("overwrites", []).append(drop.get("name"))
+    return [p for p in picks if not p.pop("_drop", False)]
+
+
+def _backfill_prebuffs(picks: list, ctx: dict) -> list:
+    """Make sure the long defensive buffs are actually offered.
+
+    The model was handed the list and still returned five permanents and two
+    invisibility spells; Center and Skin like Steel -- 27 and 36 minutes of
+    AC and hit points -- never appeared. A pre-buff section that omits the
+    buffs you would actually cast before a pull is not doing its job, so the
+    strongest few are added deterministically rather than left to chance.
+
+    Ordered by magnitude of the primary effect so an upgrade wins its slot,
+    and capped: this supplements the model's picks, it does not replace them.
+    """
+    from backend import builds_data
+    from backend.game_data import _primary_effect
+    have = {(p.get("name") or "").lower() for p in picks}
+    level = ctx.get("level")
+    cands = []
+    for sp in (ctx.get("spellbook") or {}).get("castable", []):
+        if level is not None and sp["level"] > level:
+            continue
+        if sp["name"].lower() in have:
+            continue
+        e = builds_data.spell_entry(sp["name"])
+        if not e or (e.get("durationTicks") or 0) < 100:
+            continue
+        pe = _primary_effect(e)
+        if not pe or pe[0] in _NOT_A_BUFF_SPAS:
+            continue
+        cands.append((abs(pe[1] or 0), sp))
+    cands.sort(key=lambda c: -c[0])
+    for _mag, sp in cands[:8]:
+        picks.append({"name": sp["name"], "cls": sp.get("cls") or "",
+                      "level": sp["level"],
+                      "reason": (_buff_effects(sp["name"]) or "long buff")
+                                + " — worth re-casting between pulls"})
+    return picks
+
+
+def _describe_prebuffs(picks: list) -> list:
+    """Say how long each pre-buff lasts, and whether it ever needs recasting.
+
+    The list was flat and undifferentiated, which is the opposite of useful
+    here: a permanent buff is cast once ever and a 27-minute one has to be
+    redone before the next pull, and the row gave no way to tell them apart.
+    The duration is in the same spell data the gate already reads.
+    """
+    from backend import builds_data
+    for p in picks:
+        e = builds_data.spell_entry(p.get("name") or "")
+        if not e:
+            continue
+        ticks = e.get("durationTicks") or 0
+        p["permanent"] = ticks == 0
+        if ticks:
+            # a tick is 6 seconds
+            p["duration_min"] = round(ticks * 6 / 60)
+    # permanent first, then longest-lasting: the order you actually cast in
+    picks.sort(key=lambda x: (not x.get("permanent"),
+                              -(x.get("duration_min") or 0)))
+    return picks
+
+
+def _measured_damage(ctx: dict) -> List[str]:
+    """What this character's spells and attacks ACTUALLY hit for.
+
+    The advisor was reasoning from spell levels and names alone and made
+    Smite the primary nuke while the log showed Careless Lightning hitting
+    harder in the same fights. Every encounter already stores per-ability
+    hits, total and dps -- the numbers were simply never shown to the thing
+    choosing spells.
+    """
+    agg: dict = {}
+    for e in (ctx.get("_encounters") or [])[:8]:
+        for a in e.get("abilities") or []:
+            n = a.get("name") or ""
+            if not n or not (a.get("hits") or 0):
+                continue
+            r = agg.setdefault(n, {"hits": 0, "total": 0})
+            r["hits"] += a["hits"]
+            r["total"] += a.get("total") or 0
+    rows = sorted(((v["total"], n, v) for n, v in agg.items() if v["total"]),
+                  reverse=True)
+    return [f"{n} (avg {round(v['total'] / v['hits'])}, {v['total']} total)"
+            for _t, n, v in rows[:10]]
+
+
+def _summons_a_pet(classes: List[str]) -> bool:
+    """Does any class in the trio actually summon a pet?
+
+    Pet-support spells target the pet slot (target type 14) and are useless
+    without one. A Paladin/Druid/Monk was told to slot Tiny Companion --
+    "improves pet mobility" -- with no pet to improve: none of those three
+    summons anything. A druid CAN charm an animal, which is a pet of sorts,
+    but a charm is a fight-by-fight decision and not a reason to spend two
+    of fourteen combat gems on pet utility.
+    """
+    from backend import builds_data
+    for c in classes or []:
+        for sp in (builds_data.class_spells(c) or []):
+            if any(f.get("effectId") in (33, 71)
+                   for f in (sp.get("effects") or [])):
+                return True
+    return False
+
+
+def _gate_pet_spells(picks: list, classes: List[str]) -> list:
+    """Drop pet-targeted spells when nothing in the trio has a pet."""
+    if _summons_a_pet(classes):
+        return picks
+    from backend import builds_data
+    out = []
+    for p in picks:
+        e = builds_data.spell_entry(p.get("name") or "")
+        if e and e.get("targetTypeId") == _PET_TARGET:
+            logger.info("Dropped pet spell for a pet-less trio: %s",
+                        p.get("name"))
+            continue
+        out.append(p)
+    return out
+
+
+def _gate_prebuffs(picks: list) -> list:
+    """Drop anything in the pre-buff list that is not a buff.
+
+    "Cast it before the fight, then swap the slot back" describes something
+    that LEAVES AN EFFECT ON YOU. Eye of Zomm was offered to a wizard trio:
+    it is a summoned remote eye, it does nothing to the caster, and there is
+    nothing to pre-cast. A summon, a pet, a teleport or a feign is not a
+    pre-buff however useful it is elsewhere.
+
+    Kept when the data is missing rather than dropped -- an unrecognised
+    spell is not evidence of a bad pick, and the curated line data is
+    partial by design.
+    """
+    from backend import builds_data
+    from backend.game_data import _primary_effect
+    out = []
+    for p in picks:
+        e = builds_data.spell_entry(p.get("name") or "")
+        if not e:
+            out.append(p)
+            continue
+        pe = _primary_effect(e)
+        if pe and pe[0] in _NOT_A_BUFF_SPAS:
+            logger.info("Dropped prebuff (not a buff effect): %s", p.get("name"))
+            continue
+        ticks = e.get("durationTicks") or 0
+        if ticks > 0:
+            out.append(p)          # a timed buff
+        elif e.get("targetTypeId") == _SELF_TARGET:
+            out.append(p)          # permanent-until-death self-buff
+        else:
+            # zero duration on a friendly target is a HEAL, not a buff --
+            # nothing lingers, so there is nothing to cast in advance.
+            logger.info("Dropped prebuff (instant, nothing persists): %s",
+                        p.get("name"))
+    return out
 
 
 def _dual_wields(classes: List[str]) -> Optional[bool]:
@@ -2528,9 +2985,7 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
             raw = _reply_text(response)
             data = _extract_json(raw)
             if not data:
-                raise ValueError(
-                    "no JSON object in LLM reply "
-                    f"({len(raw)} chars of text seen)")
+                raise ValueError(_no_json_reason(response, raw))
     except Exception as e:
         logger.warning("Gear advisor failed: %.140s", str(e))
         try:

@@ -5,6 +5,11 @@ import { apiGet, apiSend } from "@/lib/api";
 import { ItemHover } from "./ItemHover";
 import type { Advice, ChatMessage, DoubleCheck, ExportsStatus, GearAdvice, HuntingData, LlmInfo, OwnedAAsInfo, Snapshot, SpellbookInfo } from "@/lib/types";
 
+/** What the counsel optimises for. Mirrors the backend's allowed values. */
+const PLAYSTYLES = [
+  "solo_dps", "group_dps", "tank", "healer", "support", "pet_focused", "balanced",
+];
+
 const CLASSES = [
   "Bard", "Beastlord", "Berserker", "Cleric", "Druid", "Enchanter",
   "Magician", "Monk", "Necromancer", "Paladin", "Ranger", "Rogue",
@@ -582,6 +587,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
   const [rescanning, setRescanning] = useState(false);
   const [gear, setGear] = useState<GearAdvice | null>(null);
   const [melee, setMelee] = useState<MeleeCompare | null>(null);
+  const [trioOpen, setTrioOpen] = useState(false);
   const [gearLoading, setGearLoading] = useState(false);
   // Slots with nothing in them, so an unverifiable owned item can be shown
   // next to the gap it MIGHT fill. The app cannot match them up itself --
@@ -898,21 +904,41 @@ export const AdvisorPanel = memo(function AdvisorPanel({
       </div>
 
       <div className="adv-controls">
-        {TRIO_LABELS.map((label, i) => (
-          <div className="adv-field" key={label}>
-            <label htmlFor={`adv-cls-${i}`}>{label}</label>
-            <select
-              id={`adv-cls-${i}`}
-              value={trio[i] ?? ""}
-              onChange={(e) => setTrioAt(i, e.target.value)}
-            >
-              <option value="">—</option>
-              {CLASSES.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
+        {/* The trio comes from /who and is backed up by class inference, so
+            the pickers are no longer how anyone tells the app what they
+            play -- they are for asking "what would this look like as a
+            different trio", which is planning, not setup. Folded away so
+            live data leads, but kept: overwriting the detected trio by
+            hand is the only way to ask that question. */}
+        <details className="adv-trio" open={trioOpen}>
+          <summary
+            onClick={(e) => {
+              e.preventDefault();
+              setTrioOpen((v) => !v);
+            }}
+            title="Try the counsel against a trio you are not currently playing"
+          >
+            {snap?.class_str || "no trio detected"}
+            <span className="adv-cls"> — plan a different trio</span>
+          </summary>
+          <div className="adv-trio-fields">
+            {TRIO_LABELS.map((label, i) => (
+              <div className="adv-field" key={label}>
+                <label htmlFor={`adv-cls-${i}`}>{label}</label>
+                <select
+                  id={`adv-cls-${i}`}
+                  value={trio[i] ?? ""}
+                  onChange={(e) => setTrioAt(i, e.target.value)}
+                >
+                  <option value="">—</option>
+                  {CLASSES.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
           </div>
-        ))}
+        </details>
         <div className="adv-field">
           <label htmlFor="adv-aa">AA points</label>
           <input
@@ -985,6 +1011,23 @@ export const AdvisorPanel = memo(function AdvisorPanel({
             No OPENAI_API_KEY in .env — consults will fall back to local data. Paste the key, restart the backend.
           </span>
         )}
+        {/* Focus steers the whole consult, so it sits beside the button that
+            asks for one. It used to live at the bottom of the session
+            summary, which is the last place you would look for a control
+            over advice. */}
+        <label className="adv-focus" title="What the counsel should optimise for">
+          Focus
+          <select
+            value={snap?.playstyle ?? "balanced"}
+            onChange={(e) => patch({ playstyle: e.target.value })}
+          >
+            {PLAYSTYLES.map((p) => (
+              <option key={p} value={p}>
+                {p.replace("_", " ")}
+              </option>
+            ))}
+          </select>
+        </label>
         <button className="adv-consult" onClick={() => consult(true)} disabled={loading}>
           {loading ? "Consulting…" : "Consult"}
         </button>
@@ -1448,6 +1491,28 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                       <strong>{s.name}</strong>
                       {s.level != null && <span className="adv-cls"> (L{s.level})</span>}{" "}
                       <span className="adv-cls">({s.cls})</span>
+                      {/* A permanent buff is cast once ever; a 27-minute one
+                          has to be redone before the next pull. The flat list
+                          gave no way to tell those apart. */}
+                      {s.permanent ? (
+                        <span className="adv-dur" data-kind="perm"> until death</span>
+                      ) : s.duration_min ? (
+                        <span className="adv-dur"> {s.duration_min} min</span>
+                      ) : null}
+                      {/* EQ buffs share effect slots and silently overwrite each
+                          other — Courage and Center are the same slot, and you
+                          only find out by casting both and watching one drop.
+                          The stacking data already gates the loadout; this says
+                          it out loud. */}
+                      {/* A superseded buff is dropped by the backend rather
+                          than dimmed — a row telling you to skip it is still
+                          a row to read. Only the survivor is listed, and it
+                          says what it replaced. */}
+                      {(s.overwrites?.length ?? 0) > 0 && (
+                        <span className="adv-stack" data-kind="win">
+                          {" "}replaces {s.overwrites!.join(", ")}
+                        </span>
+                      )}
                       <br />
                       {s.reason}
                     </li>
@@ -1463,6 +1528,16 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                   {advice.replace.map((r) => (
                     <li key={r.using}>
                       <strong>{r.using}</strong> → <strong>{r.upgrade}</strong>
+                      {/* The upgrade is the best you can CAST today, not
+                          merely something better than what you named — and
+                          `next` is the rung above it, so the row says where
+                          you are and where you are going. */}
+                      {r.next && (
+                        <span className="adv-cls">
+                          {" "}· next {r.next}
+                          {r.next_level ? ` at L${r.next_level}` : ""}
+                        </span>
+                      )}
                       <br />
                       {r.why}
                     </li>
@@ -1471,38 +1546,11 @@ export const AdvisorPanel = memo(function AdvisorPanel({
               </div>
             )}
 
-            {(advice.purchase?.length ?? 0) > 0 && (
-              <div className="adv-section">
-                <h3>Vendor shopping list</h3>
-                <ul className="adv-list adv-shop">
-                  {advice.purchase!.map((p) => (
-                    <li key={p.name}>
-                      <strong>{p.name}</strong>
-                      <span className="adv-cls">
-                        {" "}L{p.level}{p.now ? "" : " — buy ahead"}
-                      </span>
-                      {(p.vendors?.length ?? 0) > 0 && (
-                        <ul className="adv-vendors">
-                          {p.vendors!.map((v) => (
-                            <li key={`${v.zone}-${v.vendor}`}>
-                              <span className="adv-vendor-zone">{v.zone}</span>
-                              {" — "}{v.vendor}
-                              {v.where && <span className="adv-cls"> · {v.where}</span>}
-                              {v.loc && <span className="adv-vendor-loc"> {v.loc}</span>}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-                <p className="adv-purchase-note">
-                  Missing from your spellbook — spells can be bought and scribed
-                  before you reach their level. Vendors are shown for the ones
-                  you can buy now.
-                </p>
-              </div>
-            )}
+            {/* The vendor shopping list is gone. Spell vendors in EQL are
+    everywhere and stock broadly, and the in-game find tool already
+    answers "where do I buy this" better than a cached wiki lookup
+    could -- it was three wiki round-trips per consult to restate
+    something the game tells you faster. */}
 
             {(advice.aa_now.length > 0 || advice.aa_save.length > 0) && (
               <div className="adv-section">
@@ -1525,7 +1573,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
 
             {advice.horizon.length > 0 && (
               <div className="adv-section">
-                <h3>Next two levels</h3>
+                <h3>Next five levels</h3>
                 <ul className="adv-list">
                   {advice.horizon.map((h) => (
                     <li key={`${h.cls}-${h.name}`}>
@@ -1571,6 +1619,39 @@ export const AdvisorPanel = memo(function AdvisorPanel({
             )}
             </div>
 
+
+            {advice.class_notes.length > 0 && (
+              <div className="adv-section">
+                <h3>Class notes</h3>
+                <ul className="adv-list">
+                  {advice.class_notes.map((n) => (
+                    <li key={n.topic}>
+                      <strong>{n.topic}</strong>
+                      <br />
+                      {n.advice}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="adv-foot">
+              <span>
+                {advice.source === "llm"
+                  ? advice.grounding === "wiki"
+                    ? "Grounded in the EQL wiki — verify costs in-game."
+                    : "From model memory (wiki unreachable) — treat names as approximate."
+                  : "Built-in notes only — the LLM is offline."}
+              </span>
+              <span>{new Date(advice.generated).toLocaleTimeString()}</span>
+            </div>
+          </>
+        )}
+
+        {/* Equipment lives OUTSIDE the advice guard. It was nested
+            inside it, so the consult-gear button could not be reached
+            until an advisor consult had run -- two independent
+            consults, one of them held hostage by the other. */}
             <div className="adv-section adv-gear-section">
               <h3 className="adv-gear-head">
                 <span>Equipment</span>
@@ -2043,34 +2124,6 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                 </>
               )}
             </div>
-
-            {advice.class_notes.length > 0 && (
-              <div className="adv-section">
-                <h3>Class notes</h3>
-                <ul className="adv-list">
-                  {advice.class_notes.map((n) => (
-                    <li key={n.topic}>
-                      <strong>{n.topic}</strong>
-                      <br />
-                      {n.advice}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div className="adv-foot">
-              <span>
-                {advice.source === "llm"
-                  ? advice.grounding === "wiki"
-                    ? "Grounded in the EQL wiki — verify costs in-game."
-                    : "From model memory (wiki unreachable) — treat names as approximate."
-                  : "Built-in notes only — the LLM is offline."}
-              </span>
-              <span>{new Date(advice.generated).toLocaleTimeString()}</span>
-            </div>
-          </>
-        )}
       </div>
     </section>
   );

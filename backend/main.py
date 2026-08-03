@@ -635,7 +635,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.4.0"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.5.0"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -1748,6 +1748,9 @@ def _advisor_ctx(book=None) -> dict:
         ctx["missing_spells"] = sorted(
             (s for s in miss["castable"] if s["level"] <= tracker.level + 3),
             key=lambda s: -s["level"])[:25]
+    # the character's own recent fights, so spell picks can be judged on
+    # measured damage rather than on level and name alone
+    ctx["_encounters"] = tracker.encounters_snapshot()
     return ctx
 
 
@@ -1779,29 +1782,13 @@ async def get_advisor(refresh: bool = False, cached: bool = False):
         return {"cached": False}
     ctx = _advisor_ctx(book)
     advice = await generate_advice(ctx)
-    # deterministic vendor list: missing spells are buyable (and scribable)
-    # BEFORE their level — compact reminder, not LLM-generated
-    lvl = tracker.level
-    advice["purchase"] = sorted(
-        ({"name": s["name"], "level": s["level"],
-          "now": lvl is None or s["level"] <= lvl}
-         for s in ctx.get("missing_spells") or []
-         # near-level window only: low-level leftovers were skipped on purpose
-         if lvl is None or s["level"] >= lvl - 2),
-        key=lambda x: -x["level"])[:8]
-    # ...and WHERE to buy each. Telling someone a spell is a vendor purchase
-    # without naming the vendor is half an answer; the wiki's spell pages
-    # carry zone, NPC, guild and coords, cached per spell after the first
-    # lookup. Only the ones buyable NOW are resolved -- a buy-ahead entry is
-    # a reminder, not a shopping trip, and each miss costs a wiki round-trip.
-    from backend.game_data import spell_vendors
-    for p in advice["purchase"]:
-        if not p.get("now"):
-            continue
-        try:
-            p["vendors"] = (await spell_vendors(p["name"]))[:3]
-        except Exception:
-            logger.exception("spell_vendors failed for %s", p["name"])
+    # No vendor shopping list here, following upstream v2.5.0: it cost up to
+    # three wiki round-trips per consult, and this fork already answers the
+    # question BETTER on demand — the counsel chat's `vendors` lookup calls
+    # the same game_data.spell_vendors (backend/agent/chat_tools.py), so
+    # "where do I buy Shieldskin?" resolves the zone page and the merchant
+    # only when asked. `purchase` therefore no longer rides the payload; the
+    # revise path below tolerates its absence.
     _advice_cache, _advice_sig = advice, sig
     _save_advice_cache()
     return advice
@@ -1894,9 +1881,12 @@ async def advisor_revise():
         raise HTTPException(502, "the revised counsel failed the "
                                  "verification gates — keeping the "
                                  "original.")
-    # deterministic extras carry over: the vendor list came from the same
-    # context, and grounding describes the original wiki fetch
-    revised["purchase"] = _advice_cache.get("purchase")
+    # deterministic extras carry over; grounding describes the original wiki
+    # fetch. `purchase` is only present on a counsel cached before v2.5.0
+    # dropped the vendor list — carried when it exists so an old cache
+    # survives a revision unchanged, and absent otherwise.
+    if _advice_cache.get("purchase") is not None:
+        revised["purchase"] = _advice_cache["purchase"]
     revised["grounding"] = _advice_cache.get("grounding",
                                              revised.get("grounding"))
     revised["revision"] = revision_meta
@@ -1913,8 +1903,13 @@ async def get_gear(refresh: bool = False, cached: bool = False):
     WITHOUT running the LLM — the tab uses it to restore results on load."""
     global _gear_cache, _gear_sig
     inv = load_export(tracker.name, tracker.server, "Inventory")
+    # max_hp / max_mana are NOT in the signature. They were, harmlessly,
+    # while they were typed once and left alone -- but the stats OCR now
+    # rewrites them every 15 seconds and they move with every buff, so a
+    # consult that took half a minute to build was being marked stale by a
+    # Strength buff landing. They are context in the prompt, not an input
+    # that changes which item wins a slot.
     sig = (tracker.class_str, tracker.level, tracker.race, tracker.pet_slots,
-           tracker.max_hp, tracker.max_mana,
            tuple(sorted(tracker.pet_inventory.items())),
            inv["updated"] if inv else None,
            _sig_rev())
