@@ -260,6 +260,38 @@ snapshot, not only `/health`, so both surfaces can explain themselves.
   errors. Exercise the render sweep (56 snapshot × preset × compact
   combinations) after touching that path.
 
+## Pets on the meter
+
+- **A pet fights BEFORE it identifies itself.** Its first swings land while
+  it is still an unknown name, so they go to `allies` — which never feeds
+  `total_out` — and the mapping that arrives later only redirects FUTURE
+  damage to `own_pet`. The result was the same pet on two rows and its
+  early damage credited to a stranger and missing from the session.
+  `_adopt_pet_damage()` folds the ally bucket in on mapping and raises
+  `total_out` AND `damage_dealt` by the same amount. That adjustment is
+  REQUIRED: the "You" row is `total_out - pet_total`, so folding without it
+  drops You by whatever was adopted. Both mapping routes (pet tell and
+  `/pet leader`) call it.
+- Own pets are labelled `<name> (pet)`, matching the `<owner> (pet)` that
+  ally pets already used. A generated pet name on a meter is otherwise
+  indistinguishable from a player. The `<name> pet` convention stays plain
+  "Pet" — it already says pet.
+
+## The overlay meter is the CURRENT fight only
+
+No last-5 aggregate: that is a slower question and the web Encounter panel
+answers it with room. Removing it also removed the encounters poller —
+`section_summary` took `history`/`segment` and used NEITHER, so once the
+aggregate went, nothing read `/api/encounters` and the overlay had been
+fetching five encounters every five seconds for data it never drew. The
+whole header now toggles Damage/DPS.
+
+**Hint lines must be MEASURED against W, not eyeballed.** The interactive
+hint was 455px of Consolas 7pt in a 300px window, so the last 40% — the
+lock and close shortcuts, the two you need when the overlay is in your way
+— was off the edge with nothing hinting more existed. Two lines now, 235px
+and 255px, checked with a font metric rather than by looking.
+
 ## Sessions (rollover + history)
 
 "Welcome to EverQuest Legends!" (login banner) is the ONE session
@@ -707,19 +739,33 @@ whenever the Inventory parse changes.
 
 ## Gear advisor
 
-- The slot table ALWAYS shows the full 24-slot EQL roster (CANON_SLOTS):
-  two generic **Any Slots** (any equippable item, stats live), paired
-  Ear/Wrist/Fingers, Ammo, Held — **no Charm or Power Source in EQL**.
-- **Any Slot semantics: a parked weapon is NOT swung.** Worn stats (AC/
-  HP/attributes/resists/haste/socketed-exaltation effects) apply from an
-  Any Slot; weapon DMG and Delay contribute NOTHING there (community-
-  documented; the BACKSTAB stat is the known exception — it feeds a
-  Rogue's backstab from there). The prompt says so, and the builtin
-  path strips DMG/DELAY from BOTH sides of an Any Slot comparison — an
-  all-weapon vector honestly reduces to the same zero baseline as an
-  empty slot, which is what let a statless shield finally beat a
-  "DMG 7" spear whose damage was doing nothing. A model claiming Any
-  Slot weapon damage matters was the live bug that motivated this.
+- **An ANY SLOT item is not swung: it contributes STATS ONLY.** No damage,
+  no delay, no white-DPS index — those apply to Primary and Secondary
+  alone. `item_stat_vector` includes DMG and DELAY, so comparing the raw
+  vector let a weapon win an Any Slot on damage it will never deal:
+  reported live, where a 3.5-index blade was offered over a Cracked Femur
+  for a slot that swings neither. Stripped of DMG/DELAY the femur has
+  `SV_DISEASE 5` and the blade has NOTHING, which is the real comparison.
+  The gear prompt states this too — the model was reading the index
+  annotations, which are emitted for any 1H weapon regardless of slot.
+  ONE exception: a Piercing dagger in an Any Slot enables Backstab for a
+  trio containing a Rogue. The deterministic path does not model backstab
+  and will therefore under-recommend a dagger there — the safe direction.
+  Worn stats (AC/HP/attributes/resists/haste/socketed-exaltation effects)
+  DO apply from there, and the BACKSTAB stat itself is kept in the vector.
+  The builtin path strips DMG/DELAY from BOTH sides of an Any Slot
+  comparison (`is_any`), so an all-weapon vector honestly reduces to the
+  same zero baseline as an empty slot — which is what let a statless
+  shield finally beat a "DMG 7" spear whose damage was doing nothing.
+- The slot table shows the 23-slot EQL roster (CANON_SLOTS): two generic
+  **Any Slots** (any equippable item, stats live), paired Ear/Wrist/
+  Fingers, Ammo — **no Charm or Power Source in EQL**, and **no Held**.
+  The client writes a Held location in the export, but the in-game UI has
+  no such slot and nothing is known to fit it, so a row permanently
+  reading "nothing owned equips here" was noise. It is not deleted so much
+  as unlisted: `_fits_slot` still demands an explicit HELD token, and
+  `_full_slot_table` appends any WORN slot outside the roster, so the row
+  returns by itself the day an item appears there.
   Unaddressed slots backfill as keep/empty rows (`_full_slot_table`).
 - Wiki item stats are BASE (+0) values, and the eqlwiki Item Level
   slider's formula (ext.itemLevelSlider JS) is PORTED into game_data.py
@@ -895,6 +941,26 @@ and exact. Stats stay wiki-only and are still REFUSED when missing.
 
 ## Group-filtered meter rows
 
+**AN EQL GROUP HOLDS FOUR.** Not the six of the EverQuest this reimagines.
+Player-supplied; nothing in the log states it, and assuming the classic
+number is the same error the wiki's classic-era item pages make. It is a
+WARNING (`over_cap` on `/api/group`), never an enforced cap: the roster
+gates the meter and extends the combat clock, so dropping a name silently
+would hide real damage, whereas an over-full roster only means something
+wants a look.
+
+
+**EQL DOES NOT ALLOW SHARED DAMAGE.** Once a mob is tagged, only the tagger
+and their group can damage it. That single game rule is what makes the
+meter tractable: a non-groupmate landing hits on something that looks like
+our mob is DEFINITIONALLY on a different one that shares a name. There is
+no case where crediting a stranger is correct, so the gate fails CLOSED —
+an empty roster means solo, and a solo player has no allies.
+
+It used to fail OPEN on an empty roster, reasoning "no evidence, credit
+everyone". That was wrong: the game rule IS the evidence. Randoms kept
+appearing in the overlay for precisely that reason.
+
 The ally gate checks the TARGET ("did they hit one of our foes"), and
 `_foe_key` can only compare mob NAMES because the log carries no mob IDs —
 so a stranger fighting a DIFFERENT mob of the same name is credited as an
@@ -907,7 +973,11 @@ contributor.
   so a join-only filter would hide a real group.
 - **"You have joined Dad Bods." is a GUILD line** — both self forms anchor
   on "the group" or the roster gets seeded with a guild name.
-- **An empty roster FAILS OPEN** and credits everyone, exactly as before.
+- **An empty roster credits NOBODY but you and your pets** — see the game
+  rule above. The cost is a real groupmate landing in the bucket when we
+  never saw them join (logging in already grouped, before anyone speaks),
+  which is why filtered damage is lumped and SHOWN: a wrongly-excluded
+  contributor stays visible and one line of group chat fixes it.
 - Filtered damage is LUMPED, never dropped: a silently missing contributor
   is indistinguishable from a quiet fight, and the gate CAN be wrong (an
   unmapped groupmate's pet has a generated name that proves nothing).
@@ -1361,7 +1431,7 @@ model selection itself is runtime-switchable in the UI.
 
 ## Releasing
 
-Latest: **v2.1.11**. MCP server clone at `MCP_SERVER_DIR` is
+Latest: **v2.1.13**. MCP server clone at `MCP_SERVER_DIR` is
 **ArtSabintsev/everquest-legends-mcp** — note a DIFFERENT project shares that
 name (Sergeantfirstclass...); it has no tags and no `src/data/eqlbuilds`, so
 builds_data.py finds nothing there. Local clone is on **v1.3.4**; **v1.3.5**

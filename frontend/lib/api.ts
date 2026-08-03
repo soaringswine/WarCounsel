@@ -40,3 +40,30 @@ export async function apiSend<T>(
   }
   return res.json();
 }
+
+/** Say by hand whether someone is grouped with you.
+ *
+ * "ignore" is not the opposite of "add" — it holds only until a join line,
+ * an invite or a word in group chat proves otherwise, since those are the
+ * signals that would have added them anyway. */
+export async function trustMember(name: string, action: "add" | "ignore") {
+  return apiSend<{
+    name: string;
+    trusted?: boolean;
+    ignored?: boolean;
+    adopted?: number;
+    group: string[];
+  }>("/api/group/trust", { name, action, trust: action === "add" });
+}
+
+/** Apply one verdict to everyone currently on the not-counted list.
+ *
+ * Server-side rather than looping single calls: the list ages and grows as
+ * the log moves, so iterating a snapshot fetched a moment ago would act on
+ * names that have since left it and miss ones that arrived. */
+export async function trustAll(action: "add" | "ignore") {
+  return apiSend<{ action: string; names: string[]; group: string[]; over_cap: boolean }>(
+    "/api/group/trust-all",
+    { action },
+  );
+}

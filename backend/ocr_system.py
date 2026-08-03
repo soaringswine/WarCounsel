@@ -28,7 +28,36 @@ logger = logging.getLogger(__name__)
 from backend.paths import data_path
 
 CONFIG_PATH = data_path("ocr_config.json")
-DEFAULT_CONFIG = {"left": 100, "top": 100, "width": 240, "height": 130, "enabled": False}
+DEFAULT_CONFIG = {
+    "left": 100, "top": 100, "width": 240, "height": 130, "enabled": False,
+    # SECOND region: the Inventory window's stat panel (HP/mana/AC/resists).
+    # Deliberately its own region, cadence and gate rather than a mode of the
+    # position feed -- that one reads a small always-visible box several
+    # times a second, and this reads a large panel that is usually not on
+    # screen at all. Sharing either setting would make one of them wrong.
+    "stats_enabled": False,
+    "stats_left": 100, "stats_top": 300, "stats_width": 320, "stats_height": 260,
+    # Stats do not move on their own. They change when you equip something,
+    # level, or buff -- so this reads on the order of a quarter-minute, not
+    # a second, and costs almost nothing next to the position feed.
+    "stats_interval": 15,
+    # Fraction of pixels that must be EQ's yellow label text before we spend
+    # an OCR pass. This is the "is the Equipment tab actually focused" test:
+    # the panel is only legible then, and an unfocused or closed window
+    # would otherwise be read as a screenful of zeroes.
+    "stats_yellow_min": 0.004,
+    # THIRD region: the in-game Group window. Unlike everything else here
+    # this one is AUTHORITATIVE -- the log never states who is in your
+    # group, only momentary signals that a quiet group never emits, and the
+    # game is showing the answer on screen the whole time. It also lists
+    # players WITHOUT their pets, which is the discriminator the pet
+    # heuristic has been guessing at.
+    "group_enabled": False,
+    "group_left": 100, "group_top": 600, "group_width": 220, "group_height": 180,
+    # Membership changes on a human timescale and the log already catches
+    # joins and leaves when it can; this is the backstop, not the feed.
+    "group_interval": 20,
+}
 GAME_PROCESS = "eqgame.exe"
 
 try:
@@ -154,6 +183,134 @@ async def ocr_region(region: dict) -> str:
     return text or ""
 
 
+
+# EQ draws the stat labels in a saturated yellow. Requiring some of it is
+# how we tell "Inventory open with Equipment focused" from "window closed"
+# or "a different tab" -- OCR on either of those yields confident nonsense
+# rather than nothing, which is the worse failure.
+def yellow_ratio(img) -> float:
+    """Fraction of pixels that look like EQ's yellow label text."""
+    import numpy as np
+    a = np.asarray(img.convert("RGB"), dtype=np.int16)
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    hit = (r > 120) & (g > 110) & (b < 110) & (abs(r - g) < 70) & ((r - b) > 60)
+    return float(hit.mean())
+
+
+_STAT_DIGIT_FIXES = str.maketrans("OoLlIiSsBb", "0011115588")
+
+# The panel spells attributes OUT ("Strength 196/510"), one label per line
+# with its value on the next. Matching the three-letter forms instead found
+# "STA" inside "STATS AND RESISTS" and reported a Stamina of 5, while
+# Strength went missing entirely because "ENGTH" overran the separator.
+# Verified against a real capture -- see tests/fixtures/ocr_stats_panel.txt.
+_PANEL_FIELDS = {
+    "STRENGTH": "str", "STAMINA": "sta", "AGILITY": "agi",
+    "DEXTERITY": "dex", "WISDOM": "wis", "INTELLIGENCE": "int",
+    "CHARISMA": "cha",
+}
+_PANEL_POOLS = {"HP": "hp", "MANA": "mana", "END": "endurance"}
+# Resists print as "SV. Magic 32/1000" -- the separator has to survive the
+# full stop, and the cap is 1000 rather than the attributes' 510.
+_PANEL_RESISTS = ("MAGIC", "FIRE", "COLD", "DISEASE", "POISON", "VOID")
+
+# Labels and values are on SEPARATE LINES, so the gap is a newline plus any
+# stray punctuation OCR invents. Bounded so a label can never reach past its
+# own value to the next field's number.
+_GAP = r"[^0-9]{0,8}"
+
+
+def _num(raw: str):
+    d = raw.translate(_STAT_DIGIT_FIXES)
+    return int(d) if d.isdigit() and len(d) <= 6 else None
+
+
+def parse_stats_text(text: str) -> dict:
+    """Pull character numbers out of the Inventory panel's OCR text.
+
+    Strict about pairing: a number counts only when its own label sits
+    beside it, so a misread lands nowhere rather than in the wrong field.
+
+    Values are read with their CAPS where the panel prints them -- "196/510"
+    for attributes, "32/1000" for resists. The cap is the half that matters:
+    a point of Strength past 510 does nothing, and gear advice that cannot
+    see that recommends stats with no effect.
+    """
+    if not text:
+        return {}
+    t = re.sub(r"[^A-Za-z0-9/]+", " ", text.upper())
+    out: dict = {}
+
+    def pair(label: str, dest: str, cap_key: Optional[str] = None) -> None:
+        m = re.search(rf"\b{label}{_GAP}([0-9OoLlIiSsBb]+)/([0-9OoLlIiSsBb]+)", t)
+        if m:
+            cur, cap = _num(m.group(1)), _num(m.group(2))
+            if cur is not None and cap is not None and cap >= cur:
+                out[dest] = cur
+                out[cap_key or f"max_{dest}"] = cap
+                return
+        m = re.search(rf"\b{label}{_GAP}([0-9OoLlIiSsBb]+)", t)
+        if m and (v := _num(m.group(1))) is not None:
+            out[dest] = v
+
+    for label, dest in _PANEL_POOLS.items():
+        pair(label, dest)
+    for label, dest in _PANEL_FIELDS.items():
+        pair(label, dest, cap_key="cap_" + dest)
+    for label in _PANEL_RESISTS:
+        pair(rf"SV\.?\s*{label}", "sv_" + label.lower(),
+             cap_key="cap_sv_" + label.lower())
+    # AC and Attack print a second number that is not a cap ("303/3501155"),
+    # so only the leading value is trusted.
+    for label, dest in (("AC", "ac"), ("ATTACK", "atk")):
+        m = re.search(rf"\b{label}{_GAP}([0-9OoLlIiSsBb]+)", t)
+        if m and (v := _num(m.group(1))) is not None:
+            out[dest] = v
+    return out
+
+def _stats_region(cfg: dict) -> dict:
+    return {"left": cfg["stats_left"], "top": cfg["stats_top"],
+            "width": cfg["stats_width"], "height": cfg["stats_height"]}
+
+
+def _capture_group(cfg: dict):
+    """Grab the Group window region and OCR it. Returns raw text.
+
+    No yellow gate here: the group box is legible whether or not it has
+    focus, and its EMPTY state is meaningful -- "Invite / LFG / Disband"
+    means solo, which is a fact worth reading, not a failure to read.
+    """
+    region = {"left": cfg["group_left"], "top": cfg["group_top"],
+              "width": cfg["group_width"], "height": cfg["group_height"]}
+    text, _hash = _capture_and_ocr(region)
+    return text or ""
+
+
+def _capture_stats(cfg: dict):
+    """Grab the stats region; OCR it only if the panel is actually up.
+
+    Returns (text, yellow_ratio). text is None when the yellow gate says
+    the Inventory window is closed or the Equipment tab is not focused --
+    OCR on either produces confident nonsense rather than nothing, and that
+    is the failure that would quietly overwrite good numbers with bad ones.
+
+    The gate grabs its own frame and then hands off to _capture_and_ocr
+    rather than doing the inference here: that function carries the tuning
+    this text needs (3x upscale, contrast stretch) and the rapidocr version
+    branch, and a second copy of it would drift from the first.
+    """
+    import mss as _mss
+    region = _stats_region(cfg)
+    with _mss.mss() as sct:
+        shot = sct.grab(region)
+    img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    ratio = yellow_ratio(img)
+    if ratio < float(cfg.get("stats_yellow_min", 0.004)):
+        return None, ratio
+    text, _hash = _capture_and_ocr(region)
+    return (text or ""), ratio
+
+
 class OcrWatcher:
     def __init__(self, tracker, ws_manager):
         self.tracker = tracker
@@ -162,6 +319,10 @@ class OcrWatcher:
         self._game_running = False
         self._game_checked = 0.0
         self.last_text: Optional[str] = None
+        self._stats_at = 0.0
+        self.stats: dict = {}
+        self.stats_seen: Optional[str] = None
+        self.stats_yellow: Optional[float] = None
         self.last_ok: Optional[str] = None
         self.error: Optional[str] = None
 
@@ -188,8 +349,46 @@ class OcrWatcher:
             "last_text": self.last_text,
             "last_ok": self.last_ok,
             "position": self.tracker.position,
+            "stats_enabled": cfg["stats_enabled"],
+            "stats_region": {k: cfg["stats_" + k]
+                             for k in ("left", "top", "width", "height")},
+            "stats_interval": cfg["stats_interval"],
+            # the gate's own reading, so calibrating is not guesswork: point
+            # the box at the panel and watch this rise above the threshold
+            "stats_yellow": self.stats_yellow,
+            "stats_yellow_min": cfg["stats_yellow_min"],
+            "stats": self.stats,
+            "stats_seen": self.stats_seen,
             "error": self.error,
         }
+
+    async def _maybe_stats(self, cfg: dict) -> None:
+        """Read the Inventory stat panel on its own slow cadence.
+
+        Separate from the position pass in every respect: a much longer
+        interval (stats change when you equip, level or buff -- not while
+        you walk), its own region, and a gate that skips the OCR entirely
+        unless the panel is on screen. Failures are swallowed: this is a
+        bonus feed and must never take the position feed down with it.
+        """
+        now = time.monotonic()
+        if now - self._stats_at < max(2, int(cfg["stats_interval"])):
+            return
+        self._stats_at = now
+        try:
+            text, ratio = await asyncio.to_thread(_capture_stats, cfg)
+        except Exception as exc:
+            self.error = f"stats OCR: {exc}"
+            return
+        self.stats_yellow = round(ratio, 4)
+        if text is None:
+            return  # panel not up -- keep the last good numbers
+        parsed = parse_stats_text(text)
+        if not parsed:
+            return
+        self.stats = parsed
+        self.stats_seen = time.strftime("%H:%M:%S")
+        self.tracker.apply_ocr_stats(parsed)
 
     async def run(self) -> None:
         if not HAS_DEPS:
@@ -202,6 +401,8 @@ class OcrWatcher:
             if not cfg["enabled"] or not self.game_running():
                 await asyncio.sleep(2.0)
                 continue
+            if cfg["stats_enabled"]:
+                await self._maybe_stats(cfg)
             try:
                 text, self._frame_hash = await asyncio.to_thread(
                     _capture_and_ocr, cfg, getattr(self, "_frame_hash", None))

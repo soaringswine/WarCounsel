@@ -32,6 +32,7 @@ except ImportError:  # deterministic/lite build ships no langchain
 
 
 from backend.llm_runtime import active as llm_active, get_llm
+from backend import builds_data
 from backend.config import settings
 from backend.game_data import (build_wiki_context, hunting_candidates, is_resurrection,
                                is_travel_ritual, same_spell_line,
@@ -849,6 +850,15 @@ async def _builtin_gear(ctx: dict) -> dict:
         # Slot comparison drop them. An all-weapon vector reduces to the
         # same zero baseline as an empty slot — which is the truth.
         is_any = base_slot == "any slot"
+        if base_slot == "secondary" and _dual_wields(classes) is False:
+            # No Dual Wield: an off-hand WEAPON never swings, so its
+            # white-DPS index describes damage that will not be dealt. A
+            # shield or stat item in that slot is still perfectly good, so
+            # this drops the weapon model rather than the slot.
+            hand = None
+            no_oh_weapon = True
+        else:
+            no_oh_weapon = False
         if base_slot == "secondary":
             # a 2H weapon occupies BOTH hands. The LLM path already dropped
             # the secondary row behind a 2H primary; this path never did,
@@ -892,6 +902,8 @@ async def _builtin_gear(ctx: dict) -> dict:
             cur_line, cur_vec, cur_wi = None, {}, None
         base_idx = (cur_wi or {}).get(hand, 0.0) if hand else 0.0
         champ = None
+        # best "wins some, loses some" candidate for this slot
+        trade = None
         # Wiki-less items we nonetheless know the SLOT of, because the
         # player has worn them before (item_facts learns Location from the
         # export). Good enough to FILL an empty slot -- that needs no
@@ -913,9 +925,15 @@ async def _builtin_gear(ctx: dict) -> dict:
                     fs = (item_facts.slot_for_id(it.get("id"))
                           or item_facts.slot_for_name(nm))
                     if fs and fs.strip().lower() == base_slot:
-                        fallback = it
+                        fallback = (it, "fills an empty slot — you have worn "
+                                    "this item before, so its slot is known "
+                                    "from your own export. Its STATS are not "
+                                    "on the wiki, so this is not a stat "
+                                    "comparison")
                 continue
             if not await _fits_slot(nm, slot):
+                continue
+            if no_oh_weapon and _is_weapon(line):
                 continue
             if classes and _trio_usable(line, classes) is False:
                 continue
@@ -925,6 +943,27 @@ async def _builtin_gear(ctx: dict) -> dict:
                 vec.pop("DMG", None)
                 vec.pop("DELAY", None)
             if not vec:
+                # The wiki page EXISTS and names the slot, but carries no
+                # numbers -- common on EQL for plain jewellery. Refusing it
+                # is right when REPLACING something (there is nothing to
+                # compare against the worn item) and wrong when FILLING:
+                # an earring in an empty ear slot beats an empty ear slot,
+                # whatever its stats turn out to be. Reported live -- a
+                # Mithril Earring +4 sat in a bag while the second ear read
+                # "nothing owned equips here", a verdict on a comparison
+                # that never ran.
+                #
+                # Weapons stay out: an unmeasurable weapon in an empty hand
+                # is a judgement call the index cannot make, and the empty
+                # off-hand already has its own reasoned path.
+                if not cur and not hand:
+                    better = (fallback is None
+                              or _item_rank(nm) > _item_rank(fallback[0]["name"]))
+                    if better:
+                        fallback = (it, "fills an empty slot — the wiki "
+                                    "lists its slot but no stats, so this "
+                                    "is not a stat comparison. Anything "
+                                    "here beats nothing")
                 continue
             if hand:
                 wi = _wpn_index(scaled, lvl)
@@ -933,22 +972,76 @@ async def _builtin_gear(ctx: dict) -> dict:
                     continue
                 gain, shown = wi[hand] - base_wi[hand], wi[hand]
             else:
-                if not _pareto_beats(vec, cur_vec):
+                a_vec, b_vec = _effective_vecs(vec, cur_vec, ctx)
+                if base_slot == "any slot":
+                    # An Any Slot item is NOT swung: it contributes stats
+                    # and nothing else. Leaving DMG/DELAY in the vector let
+                    # a weapon win the slot on damage it will never deal --
+                    # reported from live play, where a 3.5-index blade was
+                    # offered over a femur for a slot that swings neither.
+                    a_vec = {k: v for k, v in a_vec.items()
+                             if k not in ("DMG", "DELAY")}
+                    b_vec = {k: v for k, v in b_vec.items()
+                             if k not in ("DMG", "DELAY")}
+                if not _pareto_beats(a_vec, b_vec):
+                    # Not a clean win -- but "wins some, loses some" is a
+                    # real trade the player can judge, and dropping it
+                    # silently let a genuinely better boot sit in a bag
+                    # while the row read "no better owned option flagged".
+                    # That phrasing claims a search found nothing; what
+                    # actually happened is a candidate lost a tiebreak we
+                    # are not qualified to call. Strict Pareto still gates
+                    # the RECOMMENDATION -- weighting AC against AGI needs
+                    # class-specific numbers we do not have -- so the trade
+                    # is surfaced rather than decided.
+                    if cur:
+                        gains = {k: a_vec.get(k, 0.0) - b_vec.get(k, 0.0)
+                                 for k in set(a_vec) | set(b_vec)
+                                 if k != "DELAY"
+                                 and a_vec.get(k, 0.0) != b_vec.get(k, 0.0)}
+                        up = {k: v for k, v in gains.items() if v > 0}
+                        down = {k: -v for k, v in gains.items() if v < 0}
+                        if up and down:
+                            score = (len(up) - len(down), sum(up.values()))
+                            if trade is None or score > trade[0]:
+                                trade = (score, it, up, down)
                     continue
-                gain = sum(vec.get(k, 0.0) - cur_vec.get(k, 0.0)
-                           for k in set(vec) | set(cur_vec) if k != "DELAY")
+                gain = sum(a_vec.get(k, 0.0) - b_vec.get(k, 0.0)
+                           for k in set(a_vec) | set(b_vec) if k != "DELAY")
                 shown = None
             if champ is None or gain > champ[0]:
                 champ = (gain, it, shown)
-        if champ is None and fallback is not None:
+        if (base_slot == "secondary" and no_oh_weapon and champ is None
+                and fallback is None and not cur):
+            recs.append({"slot": slot, "current": cur, "recommend": None,
+                         "where": None,
+                         "why": "— your classes do not train Dual Wield, so "
+                                "an off-hand weapon would never swing; only "
+                                "a shield or stat item helps here"})
+            continue
+        if champ is None and trade is not None:
+            _sc, ti, up, down = trade
+            fmt = lambda d: ", ".join(
+                f"{'+' if v > 0 else ''}{v:g} {k.replace('_', ' ')}"
+                for k, v in sorted(d.items(), key=lambda kv: -abs(kv[1])))
             recs.append({"slot": slot, "current": cur,
-                         "recommend": fallback["name"],
-                         "why": "fills an empty slot — you have worn this "
-                                "item before, so its slot is known from your "
-                                "own export. Its STATS are not on the wiki, "
-                                "so this is not a stat comparison",
-                         "where": fallback["where"]})
-            used.add(fallback["name"].lower())
+                         "recommend": None, "where": ti["where"],
+                         "tradeoff": {"item": ti["name"],
+                                      "gains": fmt(up),
+                                      "losses": fmt(down),
+                                      "where": ti["where"]},
+                         "why": f"trade-off — {ti['name']} gives "
+                                f"{fmt(up)} but costs {fmt(down)}. Not "
+                                f"recommended automatically because judging "
+                                f"those against each other needs weights we "
+                                f"do not have; your call"})
+            continue
+        if champ is None and fallback is not None:
+            fb, fb_why = fallback
+            recs.append({"slot": slot, "current": cur,
+                         "recommend": fb["name"], "why": fb_why,
+                         "where": fb["where"]})
+            used.add(fb["name"].lower())
             continue
         if champ:
             it = champ[1]
@@ -1110,9 +1203,7 @@ def _gate_aas(items: List[dict], owned: dict, meta: dict) -> List[dict]:
     (disabling expends the current rank, re-enabling is the 0-cost rank,
     per eqlwiki and the game's own roster text), so "buy the next rank"
     while enabled would tell the player to TURN THE ABILITY OFF."""
-    if not owned:
-        return items
-    omap = {k.lower(): v for k, v in owned.items()}
+    omap = {k.lower(): v for k, v in owned.items()} if owned else {}
     toggle_bases = {re.sub(r":\s*(enabled|disabled)\s*$", "", k.lower()).strip()
                     for k in omap if re.search(r":\s*(enabled|disabled)\s*$", k)}
     out = []
@@ -1126,6 +1217,21 @@ def _gate_aas(items: List[dict], owned: dict, meta: dict) -> List[dict]:
                         "flips its state instead of upgrading it)", name)
             continue
         want = int(m.group(2)) if m else None
+        # The AA must EXIST. This gate only ever checked RANKS, so an
+        # invented name sailed through both here and, before that, via the
+        # `if not owned: return items` shortcut that skipped verification
+        # entirely for anyone who had never typed /alternateadv list.
+        # Observed live: "General - 3 pts" and "Horizon Prep - 12 pts",
+        # neither of which is an AA in any class's list -- they read like
+        # the model echoing an ability CATEGORY and this prompt's own
+        # "horizon" section label back as if they were purchasable.
+        # Enforced only when the snapshot is present: with no data we
+        # cannot tell an invented name from an unlisted one, and the house
+        # rule is that absence of data is not evidence.
+        if meta and base.lower() not in meta:
+            logger.info("Dropped AA rec — not an AA in the class data: %s",
+                        name)
+            continue
         o = omap.get(base.lower())
         mt = meta.get(base.lower()) or {}
         cap = mt.get("max")
@@ -1452,9 +1558,10 @@ Reply with ONLY a JSON object (no fences, no prose):
 Rules:
 - slots: go slot by slot; only include a slot when there is something to say — a better OWNED item sitting in bags/bank than what is worn ("recommend" = that owned item, exactly as named above), an empty slot they own a filler for, or a confirmation that the worn item is their best ("recommend" = the worn item). Recommend only [USABLE] items; the tag is authoritative. Race restrictions DO NOT EXIST in EQL. Anything marked [worn] is being worn RIGHT NOW and is proven equippable — never claim a worn item is unusable.
 - Stat-delta language: you know the character's totals ONLY when CHARACTER lists them (Max HP / Max mana / recent combat). NEVER label a stat change "huge", "massive", "tiny", "minor" or similar on its own authority — give the numbers. When Max HP is listed, express HP deltas as a rough percentage of it ("+75 HP ≈ +5.6% of your 1342"); when recent-combat numbers are listed, you may translate HP deltas into average incoming hits ("+75 HP ≈ 2 average hits of survival"). With neither, state the delta neutrally and let the numbers speak.
-- Hands: a weapon with a 2H skill (2H Slash/2H Blunt/2H Piercing) occupies BOTH Primary and Secondary. Never recommend a 2H weapon together with any Secondary item; compare 1H+1H (or 1H+shield) as a package against the 2H alone.
+- ANY SLOT gives STATS ONLY. A weapon placed there contributes NO damage, NO delay and NO white-DPS index -- it is not swung. Judge an Any Slot purely on AC, attributes, resists and effects, and NEVER compare white-DPS indices for it; those numbers apply to Primary and Secondary alone. The ONE exception: a Piercing dagger in an Any Slot enables Backstab when the trio contains a class that can backstab (Rogue), so say so if that applies. A weapon can still be the best Any Slot item when its STATS beat the alternatives.
+__DUAL_WIELD__- Hands: a weapon with a 2H skill (2H Slash/2H Blunt/2H Piercing) occupies BOTH Primary and Secondary. Never recommend a 2H weapon together with any Secondary item; compare 1H+1H (or 1H+shield) as a package against the 2H alone.
 - farm: 3-6 realistic upgrade targets for their level. STRONGLY prefer items whose drop data appears above or that you know drop in zones near their level; give the zone and the mob/vendor in "source". Never invent stats; mark uncertainty briefly in "why" when relying on memory.
-- Weapons: consider the classes' usable weapon skills; for a Monk trio prefer fist/blunt options. 1H weapon lines carry deterministic [white-DPS index: MH x / OH y] — USE THEM instead of raw damage/delay ratio: the main-hand damage bonus is a flat, delay-independent add (fast MH weapons carry it more often), the off-hand gets NO bonus and swings only part of the time, so the best MH is often NOT the best OH. Procs are NOT in the index — a strong proc can outweigh a small index gap (off-hand procs fire less often). For 2H: compare its DPS against the MH index + OH index SUM plus the stat difference.
+- Weapons: consider the classes' usable weapon skills; for a Monk trio prefer fist/blunt options. 1H weapon lines carry deterministic [white-DPS index: MH x / OH y] — USE THEM instead of raw damage/delay ratio: the main-hand damage bonus is a flat, delay-independent add (fast MH weapons carry it more often), the off-hand gets NO bonus and swings only part of the time, so the best MH is often NOT the best OH. Procs are NOT in the index — a strong proc can outweigh a small index gap. Proc rate is a PROCS PER MINUTE budget, NOT a per-swing roll: a faster weapon does not proc more often, so never argue that speed increases procs. What changes is how many hands carry a budget — the main hand gets the full rate and the off-hand HALF, so dual wielding yields about 1.5x the procs of a two-hander. Weapon lines with a combat effect carry [procs/min: ...] when the character's DEX is known; if that annotation is absent, DEX is unknown and you must not state a proc rate. For 2H: compare its DPS against the MH index + OH index SUM plus the stat difference, and against that proc gap.
 - exaltations: review where each exaltation is socketed vs what it grants. Recommend moves ONLY when clearly better (an unused bank exaltation with a strong effect, or an effect wasted on unused gear); "move_to" = the item to socket it into. Skip trivial shuffles; note uncertainty about socket compatibility.
 - ASSIGN ITEMS TO SLOTS JOINTLY, not greedily per row. Worn stats (AC/HP/attributes/resists/haste) apply identically from ANY slot the item can legally occupy — but weapon swings exist ONLY in Primary/Secondary, and Bash requires a shield in Secondary (WAR/PAL/SHD only). So position-INDEPENDENT items (shields kept for stats, spare armor) belong in Any Slots, and position-DEPENDENT value (a weapon that actually swings, an exaltation host that needs a specific slot) keeps the hand slots: for a dual-wield-capable character, shield-in-Any-Slot + weapon-still-swinging-in-Secondary beats shield-in-Secondary + weapon-parked. Before finalizing, check whether swapping any TWO of your recommendations between their slots wastes less; if it does, swap them and say so in both whys.
 """
@@ -1536,18 +1643,114 @@ async def _exalt_effect(base_item: str) -> Optional[str]:
 # every equippable slot in the EQL inventory export — the gear table always
 # shows all 24, backfilling slots the LLM didn't address. "Any Slot" x2 are
 # EQL's generic slots (hold any equippable item); no Charm/Power Source here.
+_CAPPED_STATS = ("STR", "STA", "AGI", "DEX", "WIS", "INT", "CHA")
+
+
+def _stat_headroom(ctx: dict) -> dict:
+    """How many points of each attribute are still worth having.
+
+    EQL caps attributes at 510 and the Inventory panel prints "STR 196/510",
+    so when the stats OCR is running we know the headroom exactly. A point
+    past the cap does nothing, and gear advice that cannot see that will
+    happily recommend an item for stats with no effect.
+
+    Empty when there is no reading -- unknown must behave exactly as before,
+    never as "no headroom", which would discard every attribute from every
+    comparison.
+    """
+    st = ctx.get("ocr_stats") or {}
+    out = {}
+    for k in _CAPPED_STATS:
+        cur, cap = st.get(k.lower()), st.get("cap_" + k.lower())
+        if isinstance(cur, int) and isinstance(cap, int) and cap > 0:
+            out[k] = max(0, cap - cur)
+    return out
+
+
+def _effective_vecs(cand: dict, worn: dict, ctx: dict) -> tuple:
+    """Rewrite both vectors as what each item would ACTUALLY deliver.
+
+    Naive clamping against the remaining headroom is wrong for a swap: the
+    current total already includes the worn item, so taking it off frees
+    room the candidate can use. The honest figure is each item's marginal
+    contribution over the total WITHOUT it --
+
+        base      = current - worn
+        effective = min(cap, base + item) - base
+
+    -- which values a +40 STR piece at 40 when there is room, at whatever
+    is left when there is little, and at 0 when the rest of your gear
+    already caps the stat. An item offering nothing but capped attributes
+    then correctly ties with an empty slot instead of winning.
+
+    Returns the pair unchanged when no reading exists: unknown must behave
+    exactly as it did before, never as "no headroom".
+    """
+    st = ctx.get("ocr_stats") or {}
+    if not st:
+        return cand, worn
+    c, w = dict(cand), dict(worn)
+    for key in _CAPPED_STATS:
+        cur, cap = st.get(key.lower()), st.get("cap_" + key.lower())
+        if not (isinstance(cur, int) and isinstance(cap, int) and cap > 0):
+            continue
+        worn_v = float(worn.get(key, 0.0))
+        base = max(0.0, cur - worn_v)
+        for vec, src in ((c, cand), (w, worn)):
+            v = float(src.get(key, 0.0))
+            if v > 0:
+                vec[key] = max(0.0, min(cap, base + v) - base)
+    return c, w
+
+
+def _dual_wields(classes: List[str]) -> Optional[bool]:
+    """Can this trio swing an off-hand weapon at all?
+
+    Only some classes train Dual Wield -- a Paladin/Necromancer/Wizard
+    trains none of it, so a weapon in the off-hand never swings and its
+    white-DPS index describes damage that will not be dealt. Reported live:
+    an off-hand blade was offered for its "2.7 off-hand index" to exactly
+    that trio, the same mistake as valuing an Any Slot item by its DMG.
+
+    None when the builds dataset is absent -- unknown must not read as
+    "cannot", or every install without the clone loses off-hand advice.
+    """
+    try:
+        return builds_data.any_has_skill(classes or [], "Dual Wield")
+    except Exception:
+        return None
+
+
+def _is_weapon(line: str) -> bool:
+    """A thing that SWINGS, as opposed to a shield or a stat item."""
+    if not line:
+        return False
+    if re.search(r"\bSkill:\s*(1H|2H|H2H|Piercing|Archery|Throwing)", line, re.I):
+        return True
+    return "DMG:" in line.upper() and "DELAY:" in line.upper()
+
+
 CANON_SLOTS = [
     "Any Slot 1", "Any Slot 2", "Ear 1", "Ear 2", "Head", "Face", "Neck",
     "Shoulders", "Arms", "Back", "Wrist 1", "Wrist 2", "Range", "Hands",
     "Primary", "Secondary", "Fingers 1", "Fingers 2", "Chest", "Legs",
-    "Feet", "Waist", "Ammo", "Held",
+    "Feet", "Waist", "Ammo",
 ]
+# "Held" is deliberately ABSENT. The client writes the location in the
+# inventory export, but the in-game UI has no such slot and nothing is
+# known to go in it, so a permanently-empty row saying "nothing owned
+# equips here" was pure noise in a 24-row table. _fits_slot still requires
+# an explicit HELD token, and _full_slot_table appends any worn slot it
+# does not know about -- so the day an item turns up in Held, the row
+# comes back on its own without anyone re-adding it here.
 
 
 def _full_slot_table(slots: List[dict], worn: Optional[dict]) -> List[dict]:
-    """Merge LLM recommendations onto the fixed 23-slot roster: unaddressed
-    slots keep the worn item, empty slots say so. Non-canonical slot names
-    from the LLM are appended rather than lost."""
+    """Merge LLM recommendations onto the canonical roster: unaddressed
+    slots keep the worn item, empty slots say so. Slot names outside the
+    roster are appended rather than lost -- both from the LLM and from the
+    export, so a slot we deliberately do not list (Held) still surfaces the
+    moment something is actually in it."""
     def norm(s):
         return "".join(ch for ch in (s or "").casefold() if ch.isalnum())
     by = {}
@@ -1572,6 +1775,13 @@ def _full_slot_table(slots: List[dict], worn: Optional[dict]) -> List[dict]:
                                if cur else "empty — nothing owned equips here",
                         "where": "worn" if cur else None})
     out.extend(by.values())
+    # anything WORN in a slot outside the roster: never silently dropped
+    listed = {norm(r["slot"]) for r in out}
+    for slot, cur in (worn or {}).items():
+        if cur and norm(slot) not in listed:
+            out.append({"slot": slot, "current": cur, "recommend": cur,
+                        "why": "keep — not a slot this advisor ranks",
+                        "where": "worn"})
     return out
 
 
@@ -1742,6 +1952,129 @@ async def _clickies(items: list) -> list:
     return out
 
 
+def _pet_category(line: str) -> Optional[str]:
+    """What a pet item OCCUPIES. A pet's slots are generic, but the item
+    still has a kind: it cannot wear two chests any more than a player can.
+    Weapons collapse to one category because the limit is on weapons, not
+    on Primary vs Secondary."""
+    m = re.search(r"Slot: ([A-Z ]+)", line or "")
+    toks = set(m.group(1).split()) if m else set()
+    if not toks:
+        return None
+    if re.search(r"Skill: ", line or "") and (toks & {"PRIMARY", "SECONDARY"}):
+        return "WEAPON"
+    for t in ("HEAD", "CHEST", "LEGS", "FEET", "ARMS", "HANDS", "WAIST",
+              "BACK", "NECK", "SHOULDERS", "FACE", "EAR", "WRIST",
+              "FINGER", "FINGERS", "RANGE", "AMMO"):
+        if t in toks:
+            return t
+    return None
+
+
+def _is_2h(line: str) -> bool:
+    return bool(re.search(r"Skill: 2H", line or ""))
+
+
+async def _tradeoffs(ctx: dict) -> list:
+    """Owned items that beat a worn one on SOME stats and lose on others.
+
+    The recommendation gate is a strict Pareto win, which is right -- it
+    never claims an upgrade it cannot prove. But a candidate that fails it
+    was silently discarded, and the row then read "keep -- no better owned
+    option flagged", which states that a search found nothing. What
+    actually happened is that a real trade lost a tiebreak we are not
+    qualified to call.
+
+    Reported live: Traveling Sollerets +4 (AC 13, STA 6, SV Cold 9) sat in
+    a bag while the worn boots (AC 11, AGI 10) held the slot, and the panel
+    said nothing. Weighing AC against AGI needs class-specific numbers we
+    do not have, so this surfaces the trade instead of deciding it.
+
+    Runs on EVERY path, like merge notices and clickies -- an LLM consult
+    was the one place this mattered most and the deterministic loop it
+    lived in does not run there.
+    """
+    # Imported HERE, matching the rest of this module -- game_data pulls in
+    # the wiki client, so advisor.py keeps these calls function-local.
+    from backend.game_data import (item_line, item_stat_vector,
+                                   scale_item_line, _trio_usable)
+    worn = ctx.get("worn") or {}
+    items = ctx.get("inventory_items") or []
+    classes = [x.strip() for x in (ctx.get("class_str") or "").split("/")
+               if x.strip()]
+    spares = [i for i in items
+              if i.get("where") != "worn" and i.get("name")]
+    if not worn or not spares:
+        return []
+    out = []
+    for slot, cur in worn.items():
+        cur = (cur or "").strip()
+        if not cur:
+            continue
+        try:
+            cur_line = await item_line(cur)
+        except (LookupError, OSError, ValueError):
+            # NOT a bare Exception. It swallowed a NameError from the
+            # imports above being absent and returned an empty list for
+            # EVERY slot -- indistinguishable from "no trades found".
+            cur_line = None
+        if not cur_line:
+            continue
+        cur_vec = item_stat_vector(scale_item_line(cur_line, _item_rank(cur)))
+        if not cur_vec:
+            continue
+        best = None
+        for it in spares:
+            nm = it["name"]
+            if _item_base(nm) == _item_base(cur):
+                continue
+            try:
+                line = await item_line(nm)
+            except Exception:
+                line = None
+            if not line or "Slot:" not in line:
+                continue
+            if not await _fits_slot(nm, slot):
+                continue
+            if classes and _trio_usable(line, classes) is False:
+                continue
+            base_slot = re.sub(r"\s+\d+$", "", slot.lower())
+            if (base_slot == "secondary" and _dual_wields(classes) is False
+                    and _is_weapon(line)):
+                continue  # no Dual Wield: an off-hand weapon never swings
+            vec = item_stat_vector(scale_item_line(line, _item_rank(nm)))
+            ref = cur_vec
+            if base_slot == "any slot":
+                # an Any Slot item is not swung -- same rule the recommender
+                # follows, or a weapon "wins" on damage it will never deal
+                vec = {k: v for k, v in vec.items()
+                       if k not in ("DMG", "DELAY", "HASTE")}
+                ref = {k: v for k, v in cur_vec.items()
+                       if k not in ("DMG", "DELAY", "HASTE")}
+            vec, ref = _effective_vecs(vec, ref, ctx)
+            if not vec or _pareto_beats(vec, ref):
+                continue  # a clean win is the recommender's business
+            diff = {k: vec.get(k, 0.0) - ref.get(k, 0.0)
+                    for k in set(vec) | set(ref)
+                    if k != "DELAY" and vec.get(k, 0.0) != ref.get(k, 0.0)}
+            up = {k: v for k, v in diff.items() if v > 0}
+            down = {k: -v for k, v in diff.items() if v < 0}
+            if not up or not down:
+                continue
+            score = (len(up) - len(down), sum(up.values()))
+            if best is None or score > best[0]:
+                best = (score, it, up, down)
+        if best:
+            _sc, ti, up, down = best
+            fmt = lambda d: ", ".join(
+                f"{v:g} {k.replace('_', ' ')}"
+                for k, v in sorted(d.items(), key=lambda kv: -abs(kv[1])))
+            out.append({"slot": slot, "current": cur, "item": ti["name"],
+                        "where": ti.get("where"),
+                        "gains": fmt(up), "losses": fmt(down)})
+    return out
+
+
 async def _merge_opportunities(items: list, exalts: list,
                                loot_filter: Optional[dict] = None) -> list:
     """Duplicate owned EQUIPMENT is an EQL merge opportunity: two copies
@@ -1834,6 +2167,9 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
                                              ctx.get("exaltations") or [],
                                              ctx.get("loot_filter")),
         "clickies": await _clickies(items),
+        # candidates that win some stats and lose others: real
+        # trades the strict-Pareto recommender must not claim
+        "tradeoffs": await _tradeoffs(ctx),
     }
     if not items:
         return {**base, "source": "builtin", "note":
@@ -1844,7 +2180,12 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
         return {**base, **(await _builtin_gear(ctx))}
     classes = [x.strip() for x in (ctx.get("class_str") or "").split("/")
                if x.strip()]
-    gear = await build_gear_context(items, classes, level=ctx.get("level"))
+    # DEX drives the proc-per-minute budget, and it only exists when the
+    # stats OCR is running -- without it proccing weapons carry no rate and
+    # the prompt below says nothing about procs rather than guessing one.
+    _dex = (ctx.get("ocr_stats") or {}).get("dex")
+    gear = await build_gear_context(items, classes, dex=_dex,
+                                    level=ctx.get("level"))
     exalts = ctx.get("exaltations") or []
     exalt_lines = []
     exalt_info = []
@@ -2093,6 +2434,11 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
             "slot. " + cur +
             "Recommend the BEST loadout of up to "
             f"{pet_slots} items total, following the pet auto-equip rules: "
+            "(0) a pet cannot wear two of the same KIND any more than a "
+            "player can: one chest, one head, one back, one waist. A robe "
+            "is a CHEST — do not offer it as a replacement for a cloak or "
+            "a belt. And a TWO-HANDED weapon fills both hands, so if the "
+            "pet holds one, do not add a second weapon at all; "
             "(1) up to TWO weapons — the pet keeps its OWN attack "
             "delay, so weapon delay and damage/delay RATIO are irrelevant "
             "to it; a weapon's damage counts only when it BEATS the pet's "
@@ -2121,11 +2467,42 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
         pet_block = ("PET LOADOUT: none — pet_gear must be []. (The player "
                      "sets their pet's slot count + class in the Advisor "
                      "tab, or the app reads slots from /pet inventory check.)")
+    # Only some classes train Dual Wield. Without it an off-hand weapon
+    # never swings, and the model WILL reason from the white-DPS index
+    # annotations otherwise -- it offered an off-hand blade for its "2.7
+    # off-hand index" to a Paladin/Necromancer/Wizard. The deterministic
+    # gate drops such picks; saying it here stops the prose being written
+    # in the first place.
+    # Capped attributes, so the model stops offering stats with no effect.
+    _hr = _stat_headroom(ctx)
+    if _hr:
+        full = [k for k, v in _hr.items() if v <= 0]
+        near = [f"{k} ({v} left)" for k, v in _hr.items() if 0 < v <= 20]
+        bits = []
+        if full:
+            bits.append("AT THE 510 CAP (further points do NOTHING): "
+                        + ", ".join(full))
+        if near:
+            bits.append("nearly capped: " + ", ".join(near))
+        if bits:
+            lines.append("- " + "; ".join(bits)
+                         + ". Never recommend an item FOR a capped stat.")
+    _dw = _dual_wields(classes)
+    dw_rule = ""
+    if _dw is False:
+        dw_rule = ("- This trio does NOT train Dual Wield. An off-hand WEAPON "
+                   "would never swing, so NEVER recommend one for Secondary "
+                   "and never cite an off-hand white-DPS index. A shield or "
+                   "a stat item in Secondary is still worth recommending." + chr(10))
+    elif _dw is True:
+        dw_rule = ("- This trio trains Dual Wield, so an off-hand weapon does "
+                   "swing and its off-hand index counts." + chr(10))
     prompt = (GEAR_PROMPT
               .replace("__PET_BLOCK__", pet_block)
               .replace("__CONTEXT__", chr(10).join(lines))
               .replace("__GEAR__", chr(10).join(gear["lines"]))
-              .replace("__EXALTS__", chr(10).join(exalt_lines) or "none owned"))
+              .replace("__EXALTS__", chr(10).join(exalt_lines) or "none owned")
+              .replace("__DUAL_WIELD__", dw_rule))
     # the briefing, kept for the gear double-check. Deliberately NOT built
     # on the deterministic path: it needs the full mined gear context, so
     # a builtin gear cache simply has no briefing and the check endpoint
@@ -2257,6 +2634,24 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
                 hv = _vec2(_scl2(hline, _ir2(hnm)))
                 if hv:
                     held_vecs.append((hnm, hv))
+    # What the pet ALREADY occupies. A pet is a bag of generic slots, but
+    # the items in it are not generic: two chests is as impossible for a
+    # pet as for a player, and a two-hander leaves no hand for a second
+    # weapon. Both rules were in the PROMPT only, and the model broke both
+    # in one reply -- two robes, plus a 1H sword offered to a pet already
+    # holding a 2H.
+    held_2h = False
+    held_weapons = 0
+    for _hnm in list(pet_inv.values()):
+        try:
+            _hl = await _il2(_hnm)
+        except Exception:
+            _hl = None
+        if _pet_category(_hl) == "WEAPON":
+            held_weapons += 1
+            if _is_2h(_hl):
+                held_2h = True
+    claimed: set = set()
     for ph in _clean_list(data.get("pet_gear"), ("item", "slot", "why"),
                           cap=max(0, int(pet_slots)),
                           require="item"):
@@ -2283,6 +2678,33 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
                 logger.info("Dropped pet-gear rec - %s is strictly worse "
                             "than held %s", ph["item"], dominated_by)
                 continue
+        cat = _pet_category(rline)
+        if cat == "WEAPON":
+            # A held 2H occupies both hands; nothing else can be added.
+            if held_2h:
+                logger.info("Dropped pet-gear rec — pet holds a 2H, no room "
+                            "for %s", ph["item"])
+                continue
+            if _is_2h(rline) and (held_weapons or "WEAPON" in claimed):
+                logger.info("Dropped pet-gear rec — 2H %s cannot join "
+                            "another weapon", ph["item"])
+                continue
+            if held_weapons + sum(1 for c in claimed if c == "WEAPON") >= 2:
+                logger.info("Dropped pet-gear rec — pet already has two "
+                            "weapons: %s", ph["item"])
+                continue
+            claimed.add("WEAPON")
+            held_weapons += 1
+            if _is_2h(rline):
+                held_2h = True
+        elif cat:
+            # a SWAP for a held item of the same kind is fine; a second
+            # recommendation of that kind is not
+            if cat in claimed:
+                logger.info("Dropped pet-gear rec — %s is a second %s",
+                            ph["item"], cat)
+                continue
+            claimed.add(cat)
         ph["where"] = where
         pet_gear.append(ph)
     table = _full_slot_table(slots, ctx.get("worn"))

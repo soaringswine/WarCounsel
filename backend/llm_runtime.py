@@ -59,7 +59,13 @@ def model_for(provider: str) -> str:
     if provider == "codex_cli":
         # empty means "whatever codex itself is configured with"
         return cfg.get("codex_cli_model") or settings.codex_cli_model or "default"
-    return settings.model                      # lmstudio
+    # lmstudio. set_active() has always PERSISTED cfg["model"] for this
+    # provider, but this function read straight past it to settings.model,
+    # so a model chosen at runtime was written and then ignored -- and
+    # because the app keeps sending the stale id, LM Studio JIT-loads it
+    # and evicts whatever the user loaded by hand. Read the same key that
+    # is written, exactly as the two providers above already do.
+    return cfg.get("model") or settings.model
 
 
 def effort_for(provider: str) -> str:

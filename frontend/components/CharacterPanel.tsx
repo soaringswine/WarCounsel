@@ -301,6 +301,30 @@ export const CharacterPanel = memo(function CharacterPanel({
           </div>
         )}
 
+        {Object.keys(snap.unlock_loot ?? {}).length > 0 && (
+          <div className="loot-list unlock-list">
+            {/* Nothing in the game says a Gnoll Fang is 1/1200th of a
+                Barbarian at the moment you loot it, and the cost of not
+                knowing is not a wasted click — it is having sold four
+                hundred of them. */}
+            <h3>Race unlock turn-ins</h3>
+            <ul>
+              {Object.entries(snap.unlock_loot ?? {}).map(([item, u]) => (
+                <li key={item} title={u.note ?? undefined}>
+                  <span className="unlock-item">{item}</span>
+                  <span className="unlock-count">
+                    {u.count}
+                    {u.total ? ` / ${u.total}` : ""}
+                  </span>
+                  <span className="unlock-where">
+                    {u.race} — {u.npc}, {u.zone}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {trios.length > 1 && (
           <div className="loot-list hunt-list">
             <h3>Trio comparison</h3>
@@ -417,7 +441,12 @@ export const CharacterPanel = memo(function CharacterPanel({
                   <th scope="col">Mob</th>
                   <th scope="col">Kills</th>
                   <th scope="col">XP</th>
-                  <th scope="col">Coin</th>
+                  {/* No per-mob Coin column: coin is worth knowing as a
+                      session total, which the tile above already gives.
+                      Split across a mob list it is noise — and the width
+                      is better spent on kills, XP and drop rate. The data
+                      is still tracked; it feeds drop-rate work and the
+                      all-time totals. */}
                   <th scope="col" title="Observed drop rate — items dropped / kills">
                     Drops
                   </th>
@@ -432,7 +461,6 @@ export const CharacterPanel = memo(function CharacterPanel({
                     <td className="hunt-name">{m.name}</td>
                     <td>{m.kills}</td>
                     <td>{m.xp_percent > 0 ? `${m.xp_percent.toFixed(1)}%` : "—"}</td>
-                    <td>{m.coin_copper ? fmtCoin(m.coin_copper) : "—"}</td>
                     <td>
                       {m.kills > 0 && (m.loot_drops ?? 0) > 0
                         ? `${Math.round((100 * (m.loot_drops ?? 0)) / m.kills)}%`

@@ -1094,7 +1094,6 @@ body {
 }
 
 .adv-foot {
-  margin-top: 4px;
   padding-top: 10px;
   border-top: 1px solid var(--hairline-dim);
   color: var(--muted);
@@ -2098,18 +2097,21 @@ button.app-version:hover { color: var(--gold-bright); }
 /* ---- item hover cards (wiki acquisition data) ---- */
 .item-hover { position: relative; cursor: help; border-bottom: 1px dotted var(--hairline); }
 .item-hover-card {
-  position: absolute;
-  left: 0;
-  top: 100%;
-  z-index: 40;
+  /* FIXED and portalled to <body>: the panels set backdrop-filter (a
+     stacking context z-index cannot escape) and scroll their bodies (which
+     clipped it). Positioned from JS against the hovered name. */
+  position: fixed;
+  z-index: 55;  /* over every panel, under the modals at 60 */
   display: block;
   min-width: 230px;
   max-width: 330px;
   margin-top: 4px;
   padding: 8px 10px;
-  background: rgba(18, 21, 26, 0.97);
+  /* Fully opaque. At 0.97 the ledger text behind it stayed faintly legible
+     through the card, which read as the popup being see-through. */
+  background: #12151a;
   border: 1px solid var(--hairline);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.7);
   font-size: 11.5px;
   font-weight: 400;
   line-height: 1.45;
@@ -2467,4 +2469,229 @@ button.app-version:hover { color: var(--gold-bright); }
   font-size: 10px;
   margin-top: 2px;
   letter-spacing: 0.02em;
+}
+
+/* Inline action inside a note — reads as part of the sentence, not a
+   separate control competing with Save. */
+.link-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--gold-bright, #e7cd92);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-btn:hover { color: #fff; }
+
+/* --- Not counted: contributors held off the meter ------------------------
+   Deliberately quieter than the group table it sits under. This is a
+   question, not a result -- an unanswered one must not compete with the
+   numbers a player is actually reading mid-fight. */
+.enc-filtered { opacity: .82; }
+.enc-filtered-why {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-dim, rgba(226, 222, 214, .62));
+}
+.enc-share { color: var(--ink-dim, rgba(226, 222, 214, .62)); }
+.enc-trust {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  color: var(--gold, #c8aa6e);
+  background: transparent;
+  border: 1px solid rgba(200, 170, 110, .34);
+  border-radius: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.enc-trust:hover { background: rgba(200, 170, 110, .12); }
+.enc-trust:focus-visible { outline: 2px solid var(--gold, #c8aa6e); outline-offset: 1px; }
+
+/* Header a screen reader needs and sighted users do not: the button column
+   is self-evident on screen, unlabelled to anything else. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Correct an item's stats -------------------------------------------
+   Sits beside an item name in the gear table. Quiet by default: it is an
+   escape hatch for a wrong wiki page, not something to reach for every
+   time, so it must not compete with the recommendation it sits next to. */
+.adv-statfix-open {
+  font: inherit;
+  font-size: 10px;
+  margin-left: 6px;
+  padding: 0 4px;
+  color: var(--ink-dim, rgba(226, 222, 214, .55));
+  background: transparent;
+  border: 1px solid rgba(200, 170, 110, .22);
+  border-radius: 0;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.adv-statfix-open:hover {
+  color: var(--gold, #c8aa6e);
+  border-color: rgba(200, 170, 110, .5);
+}
+.adv-statfix-open:focus-visible {
+  outline: 2px solid var(--gold, #c8aa6e);
+  outline-offset: 1px;
+}
+.adv-statfix { display: inline-flex; gap: 4px; align-items: center; margin-left: 6px; }
+.adv-statfix input {
+  font: inherit;
+  font-size: 11px;
+  width: 15ch;
+  padding: 1px 4px;
+  color: inherit;
+  background: rgba(0, 0, 0, .3);
+  border: 1px solid rgba(200, 170, 110, .4);
+  border-radius: 0;
+}
+.adv-statfix button {
+  font: inherit;
+  font-size: 10px;
+  padding: 1px 5px;
+  color: var(--gold, #c8aa6e);
+  background: transparent;
+  border: 1px solid rgba(200, 170, 110, .34);
+  border-radius: 0;
+  cursor: pointer;
+}
+.adv-statfix button:disabled { opacity: .5; cursor: default; }
+
+/* Two verdicts on one row: Add counts them, Ignore hides them until the
+   log proves otherwise. Ignore is the quieter of the pair — it is the
+   reversible one, and the destructive-looking option should not be the
+   loud one. */
+.enc-trust-cell { display: flex; gap: 4px; justify-content: flex-end; }
+.enc-trust[data-act="ignore"] {
+  color: var(--ink-dim, rgba(226, 222, 214, .58));
+  border-color: rgba(200, 170, 110, .2);
+}
+.enc-trust[data-act="ignore"]:hover {
+  color: var(--ink, #e2ded6);
+  background: rgba(255, 255, 255, .05);
+}
+
+/* Bulk verdicts, under the table they apply to. Deliberately below the
+   per-row buttons: the row-by-row call is the accurate one, and these are
+   the shortcut you reach for when the list is obviously all one thing. */
+.enc-bulk {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.enc-trust[data-act="warn"] {
+  color: #d4574a;
+  border-color: rgba(212, 87, 74, .55);
+}
+.enc-trust[data-act="warn"]:hover { background: rgba(212, 87, 74, .12); }
+
+/* Result of "Test read" for the stats box. Sits directly under its row —
+   the position box shows its equivalent inside the setup modal, but this
+   one is placed from the panel itself, so its answer belongs there too. */
+.ocr-preview {
+  margin: 4px 0 0;
+  padding: 4px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-dim, rgba(226, 222, 214, .7));
+  background: rgba(0, 0, 0, .22);
+  border-left: 2px solid rgba(200, 170, 110, .34);
+}
+
+/* --- OCR setup, in Settings ---------------------------------------------
+   Two regions, each with a toggle, a placement button and a test read. The
+   state word sits beside its toggle rather than in a status bar: with two
+   feeds, one shared line could not say which of them was working. */
+.ocr-set { display: flex; flex-direction: column; gap: 14px; }
+.ocr-set-row + .ocr-set-row {
+  padding-top: 12px;
+  border-top: 1px solid rgba(200, 170, 110, .18);
+}
+.ocr-set-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.ocr-set-state {
+  font-size: 11px;
+  color: var(--ink-dim, rgba(226, 222, 214, .6));
+}
+.ocr-set-state[data-live="true"] { color: #1fb38c; }
+.ocr-set-actions { display: flex; gap: 6px; margin-top: 6px; }
+.ocr-set-actions button {
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  color: var(--gold, #c8aa6e);
+  background: transparent;
+  border: 1px solid rgba(200, 170, 110, .34);
+  border-radius: 0;
+  cursor: pointer;
+}
+.ocr-set-actions button:hover:not(:disabled) { background: rgba(200, 170, 110, .12); }
+.ocr-set-actions button:disabled { opacity: .5; cursor: default; }
+
+/* An API key is a secret, not a login. Masking it with text-security keeps
+   it out of the browser's password manager entirely — a type="password"
+   field attracts Chrome's save/generate UI no matter what the autocomplete
+   hint says. Browsers without this property get a real password field
+   instead (see SettingsModal), and none of those ship that UI. */
+.set-secret {
+  -webkit-text-security: disc;
+  text-security: disc;
+}
+
+/* Probed LM Studio models, as things you can click. The dot marks the ones
+   LM Studio has resident right now — picking a different one is legal but
+   makes it swap, which is worth seeing before you choose. */
+.model-picks { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0 2px; }
+.model-pick {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  color: var(--ink-dim, rgba(226, 222, 214, .72));
+  background: transparent;
+  border: 1px solid rgba(200, 170, 110, .26);
+  border-radius: 0;
+  cursor: pointer;
+}
+.model-pick:hover { background: rgba(200, 170, 110, .12); color: var(--ink, #e2ded6); }
+.model-pick[data-on] {
+  color: var(--gold, #c8aa6e);
+  border-color: rgba(200, 170, 110, .7);
+  background: rgba(200, 170, 110, .1);
+}
+.model-pick[data-loaded]::before {
+  content: "●";
+  margin-right: 5px;
+  color: #1fb38c;
+  font-size: 9px;
+  vertical-align: middle;
+}
+.model-pick:focus-visible { outline: 2px solid var(--gold, #c8aa6e); outline-offset: 1px; }
+
+/* Race-unlock turn-ins seen this session. Styled as progress, not as loot:
+   the count against the target is the whole point — one fang means nothing,
+   "37 / 1200" tells you whether to keep going. */
+.unlock-list li { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; }
+.unlock-item { color: var(--milestone, #c8aa6e); }
+.unlock-count { font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 11px; }
+.unlock-where {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: var(--muted, rgba(226, 222, 214, .55));
 }

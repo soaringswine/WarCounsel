@@ -71,6 +71,16 @@ export interface MobStat {
   loot_drops?: number;
 }
 
+export interface FilteredContributor {
+  name: string;
+  damage: number;
+  fights: number;
+  /** Percent of this session's fights they appeared in. */
+  share: number;
+  /** No player evidence — never in a /who, never spoke. Probably a pet. */
+  pet?: boolean;
+}
+
 export interface EncounterAlly {
   name: string;
   damage: number;
@@ -178,6 +188,18 @@ export interface ZoneGeometry3D {
 }
 
 export interface Snapshot {
+  /** Looted items that are race-unlock turn-ins, with a running tally. */
+  unlock_loot?: Record<string, {
+    count: number;
+    race: string;
+    npc: string;
+    zone: string;
+    total?: number | null;
+    factions?: string[];
+    note?: string | null;
+  }>;
+  /** Contributors hidden from the meter — not known to be in your group. */
+  filtered?: FilteredContributor[];
   pet_slots?: number | null;
   pet_classes?: string | null;
   /** User-reported from the in-game UI — the log never prints them. */
@@ -623,5 +645,7 @@ export interface LlmProbe {
   loaded: string[];
   /** whether the configured model appears in the server's list */
   model_present?: boolean;
+  /** loaded context window, where the server reports one */
+  context?: number | null;
   reason?: string | null;
 }

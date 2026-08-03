@@ -32,7 +32,10 @@ from backend.agent.graph import get_agent
 from backend.agent.state import AgentState, ProfileData
 from backend.config import detect_game_dir, settings
 from backend.game_data import hunting_candidates, spell_classes
-from backend import session_state
+from backend import item_facts, session_state
+from backend.log_system.parser import CLASS_ABBREV as _CA
+# full class name -> the game's own three-letter form
+_ABBREV_FOR = {v.lower(): k for k, v in _CA.items()}
 from backend.geometry_system import geometry3d_for_zone, geometry_for_zone
 from backend.log_system import LogWatcher, discover_log_file
 from backend.log_system.parser import extract_character_from_filename, parse_line
@@ -632,7 +635,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.1.11"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.4.0"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -650,9 +653,31 @@ def _mount_static_ui() -> None:
 
 
 app.add_middleware(GZipMiddleware, minimum_size=2048)
+def _allowed_origins() -> list[str]:
+    """The configured UI origin, plus the same machine spelled the other way.
+
+    "localhost:3000" and "127.0.0.1:3000" are DIFFERENT origins to a
+    browser, so a UI opened on one while CORS allowed the other looked
+    alive -- the WebSocket carried the snapshot and kept every panel
+    populated -- while every REST feature failed silently. Consults, the
+    settings panel and the OCR status line all just did nothing.
+
+    Deliberately NOT a wildcard. allow_origins=["*"] would let any page the
+    user happens to visit read their character data off this server; these
+    two names resolve to the same loopback host and nothing else.
+    """
+    seen = [settings.frontend_origin]
+    for a, b in (("localhost", "127.0.0.1"), ("127.0.0.1", "localhost")):
+        if a in settings.frontend_origin:
+            alt = settings.frontend_origin.replace(a, b, 1)
+            if alt not in seen:
+                seen.append(alt)
+    return seen
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -686,6 +711,41 @@ async def health():
             "log_last_growth": growth.isoformat() if growth else None,
             "log_stalled_s": (round((datetime.now() - growth).total_seconds())
                               if growth else None)}
+
+
+@app.get("/api/group")
+async def get_group():
+    """The roster, plus the contributors we are hiding from the meter."""
+    from backend.state_tracker import GROUP_CAP
+    roster = sorted(tracker.group_members)
+    return {"group": roster,
+            "cap": GROUP_CAP,
+            # More names than a group can hold means at least one is wrong,
+            # and a wrong name credits damage that is not yours -- the
+            # roster both gates the meter and extends the combat clock.
+            "over_cap": len(roster) > GROUP_CAP,
+            "ignored": sorted(tracker.ignored_contributors),
+            "filtered": tracker.filtered_view(),
+            "fights": tracker.session_fights}
+
+
+@app.post("/api/group/trust")
+async def post_group_trust(body: dict):
+    """Say by hand whether someone is grouped with you.
+
+    Every automatic signal for this is momentary -- an invite accepted, a
+    join line, a line of group chat -- so a group formed by invite that
+    plays quietly emits nothing at all and its damage stays hidden. The
+    player knows; this is the seam where they can say so.
+    """
+    res = tracker.trust_member(body.get("name", ""),
+                               bool(body.get("trust", True)),
+                               action=(body.get("action") or ""))
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "bad request"))
+    session_state.save(tracker, watcher.log_file if watcher else "",
+                       watcher.offset if watcher else 0)
+    return res
 
 
 @app.get("/api/character")
@@ -743,6 +803,11 @@ async def patch_character(patch: CharacterPatch, db: Session = Depends(get_db)):
         if value is not None:
             setattr(row, field, value)
             setattr(tracker, field, value)
+            if field in ("max_hp", "max_mana"):
+                # A typed number is a deliberate statement; a screen reading
+                # is a guess that can be wrong in ways nobody notices. Once
+                # the player has said it, the stats OCR stops overwriting it.
+                setattr(tracker, f"_{field}_manual", True)
     if patch.class_str is not None:  # manual trio edit resolves the mismatch hint
         tracker.unknown_casts.clear()
         tracker.loadout_hint = None
@@ -845,6 +910,30 @@ async def get_spellsets():
     return {"available": True, "file": path.name, "sets": sets}
 
 
+def _set_name_for_trio(source: str) -> str:
+    """Default spell-set name, keyed to the TRIO rather than fixed.
+
+    A loadout belongs to a class combination, so a fixed "companion" meant
+    every trio overwrote the last one -- and the only way to keep two was
+    to regenerate and log out each time you swapped. Named per trio they
+    simply coexist, which is what the player was already doing by hand
+    ("pal/dru/mnk" and "pal/dru/mnk-buffs").
+
+    Abbreviations, not full names: the game caps the field and
+    "Paladin/Druid/Monk-buffs" does not fit in 24 characters.
+    """
+    trio = (getattr(tracker, "class_str", "") or "").strip()
+    short = "/".join(
+        _ABBREV_FOR.get(p.strip().lower(), p.strip()[:3]).lower()
+        for p in trio.split("/") if p.strip()
+    )
+    if not short:
+        # class unknown until /who -- keep the old names rather than
+        # inventing a label that says nothing
+        return "prebuffs" if source == "prebuffs" else "companion"
+    return f"{short}-buffs"[:24] if source == "prebuffs" else short[:24]
+
+
 @app.post("/api/spellsets/generate")
 async def generate_spellset(body: dict | None = None):
     """Write the advisor's Memorize-now list as an in-game spell set.
@@ -855,7 +944,7 @@ async def generate_spellset(body: dict | None = None):
     from backend.game_data import _primary_effect as game_data_primary
     from backend.game_data import supersedes_for_slots
     source = ((body or {}).get("source") or "loadout").strip()
-    default_name = "prebuffs" if source == "prebuffs" else "companion"
+    default_name = _set_name_for_trio(source)
     name = ((body or {}).get("name") or default_name).strip()[:24]
     if _advice_cache is None:
         raise HTTPException(400, "no counsel cached — press Consult first")
@@ -973,6 +1062,247 @@ async def get_events(limit: int = 100):
     return {"events": items}
 
 
+@app.post("/api/item-stats")
+async def post_item_stats(body: dict):
+    """Correct an item's stats from what the player can actually see.
+
+    eqlwiki carries some classic-era pages verbatim, and a wrong number
+    survives every gate we have: the item is owned, it fits the slot, it is
+    class-usable, so the only thing that could catch it is someone reading
+    the item. Marked as an override so it beats the page rather than only
+    filling a gap.
+    """
+    name = (body.get("name") or "").strip()
+    stats = (body.get("stats") or "").strip()
+    if not name or not stats:
+        raise HTTPException(400, "name and stats are required")
+    # Accept just the NUMBERS ("AC: 6") and keep the wiki's Slot and Class.
+    # Those two are what gate the item -- which slot it fits, who may wear
+    # it -- and they are the parts the wiki gets right; what it misses or
+    # mis-states is the stat block. Making the player retype them would
+    # invite a typo that silently un-gates an item.
+    if "slot:" not in stats.lower():
+        try:
+            from backend.game_data import item_line
+            existing = await item_line(name)
+        except Exception:
+            existing = None
+        keep = []
+        for part in (existing or "").split(";"):
+            t = part.strip()
+            if t.lower().startswith(("slot:", "class:", "skill:", "race:")):
+                keep.append(t)
+            elif "|" in t:  # drop the drops/vendor tail
+                break
+        if keep:
+            head = [k for k in keep if k.lower().startswith("slot:")]
+            tail = [k for k in keep if not k.lower().startswith("slot:")]
+            stats = "; ".join(head + [stats] + tail)
+    global _advice_cache, _gear_cache
+    item_facts.set_stats(body.get("item_id") or 0, stats,
+                         int(body.get("rank") or 0),
+                         slot=body.get("slot"), name=name,
+                         override=bool(body.get("override", True)))
+    # a consult already on screen was reasoning about the OLD numbers
+    _advice_cache = None
+    _gear_cache = None
+    _save_advice_cache()
+    return {"ok": True, "name": name, "stats": stats}
+
+
+@app.post("/api/group/trust-all")
+async def post_group_trust_all(body: dict):
+    """Add or ignore everyone on the not-counted list in one go."""
+    action = (body.get("action") or "").strip()
+    if action not in ("add", "ignore"):
+        raise HTTPException(400, "action must be add or ignore")
+    res = tracker.trust_all(action)
+    session_state.save(tracker, watcher.log_file if watcher else "",
+                       watcher.offset if watcher else 0)
+    return res
+
+
+# Verbs that are a WEAPON swinging. Everything else a player emits is a
+# class skill on its own timer (kick, bash, smite, and the monk line --
+# strike is Eagle Strike, punch is Dragon Punch) or is not melee at all:
+# "You hit X for 204 points of magic damage by Careless Lightning" is a
+# SPELL that happens to use the verb.
+#
+# The first version of this list included strike, punch, hit and bite, and
+# then inferred hand count from how many verbs appeared -- so a two-hander
+# swung alongside monk specials looked exactly like dual wield. The player
+# said their recent fights were with a 2H sword while this reported dual
+# wield for all of them, which is what exposed it.
+_WEAPON_VERBS = {"slash", "pierce", "crush", "backstab", "slice"}
+
+# Per-level dual-wield SKILL cap, by class (eqlwiki, Skill Dual Wield).
+# The off-hand swings only when a check against that skill passes, at
+# (level + skill) / 400 -- so the uplift from a second weapon is far below
+# double at low level and rises with it.
+_DW_SKILL_PER_LEVEL = {"monk": 7, "rogue": 6, "warrior": 5, "ranger": 5,
+                       "bard": 5, "beastlord": 5}
+
+
+def _dual_wield_ceiling(classes: list, level) -> Optional[float]:
+    """Best-case extra swings from an off-hand, as a fraction, or None.
+
+    NOT used to classify a loadout. Two attempts at inferring hand count
+    from the log were both wrong -- first from how many weapon verbs
+    appeared (a two-hander beside monk specials read as dual wield), then
+    from a flat swing-rate threshold that assumed a second weapon roughly
+    doubles the rate. It does not: at level 23 a maxed skill lands the
+    off-hand under half the time, so a real 2x1H pair measured 14.3
+    swings/min against a two-hander's 11.1 and would have been called a
+    two-hander.
+
+    Two slashing weapons both log "slash". The log cannot answer this, so
+    the view reports the RATE and this ceiling as context, and leaves the
+    reading to the player who knows what they equipped.
+    """
+    if not level:
+        return None
+    best = max((_DW_SKILL_PER_LEVEL.get((c or "").strip().lower(), 0)
+                for c in (classes or [])), default=0)
+    if not best:
+        return None
+    cap = (level + 1) * best
+    chance = (level + cap) / 400.0
+    # Ambidexterity is a real, owned-or-not modifier -- 1 rank, 9 points,
+    # "increases your chance to successfully dual wield by 32%". Whether
+    # that is 32 POINTS or a 32% relative increase is not stated, so the
+    # response carries both readings rather than picking one silently.
+    return round(min(1.0, chance), 2)
+
+
+def _ambidexterity_owned() -> bool:
+    owned = getattr(tracker, "owned_aas", None) or {}
+    names = owned.keys() if isinstance(owned, dict) else owned
+    return any("ambidex" in str(n).lower() for n in names)
+
+
+@app.get("/api/melee-compare")
+async def melee_compare(db: Session = Depends(get_db), band: int = 3):
+    """Observed weapon DPS grouped by which weapon verbs appeared.
+
+    The question this answers -- "do I lose DPS giving up dual wield for a
+    two-hander" -- cannot be modelled honestly. eqlwiki does not publish the
+    two-handed damage bonus; it links out to a classic-EverQuest table, and
+    classic values have already been wrong for this game more than once
+    (see the item pages that list stats EQL rebalanced). So this measures
+    instead of predicting.
+
+    The verb set is a FINGERPRINT of the loadout, not a record of it: the
+    log never says what is equipped, but a two-hander swings one verb and a
+    dual-wield pair swings two. That inference is the weak link and it is
+    stated rather than hidden.
+
+    The other confound is level -- a fingerprint seen only at 27 will beat
+    one seen at 12 whatever was equipped -- so groups also report their
+    level range, and `overlap` re-runs the comparison inside the band where
+    two or more fingerprints actually coexist.
+    """
+    if not _character_id:
+        return {"groups": [], "overlap": None}
+    rows = (db.query(LogEventRow)
+            .filter(LogEventRow.character_id == _character_id,
+                    LogEventRow.event_type == "encounter",
+                    LogEventRow.ts >= _launch_bound())
+            .order_by(LogEventRow.id.desc()).limit(800).all())
+
+    def collect(lo=None, hi=None) -> list:
+        acc: dict = {}
+        for r in rows:
+            d = r.payload or {}
+            lv = d.get("level")
+            if lo is not None and (lv is None or not (lo <= lv <= hi)):
+                continue
+            verbs, dmg, hits = set(), 0, 0
+            for a in d.get("abilities") or []:
+                if (a.get("kind") or "") != "melee":
+                    continue
+                n = (a.get("name") or "").strip().lower()
+                if n in _WEAPON_VERBS:
+                    verbs.add(n)
+                    dmg += a.get("total") or 0
+                    hits += a.get("hits") or 0
+            if not verbs or not d.get("duration"):
+                continue
+            g = acc.setdefault("+".join(sorted(verbs)),
+                               {"verbs": sorted(verbs), "fights": 0,
+                                "damage": 0, "seconds": 0.0, "hits": 0,
+                                "levels": []})
+            g["fights"] += 1
+            g["damage"] += dmg
+            g["seconds"] += d["duration"]
+            g["hits"] += hits
+            if lv:
+                g["levels"].append(lv)
+        out = []
+        for g in acc.values():
+            if g["seconds"] < 60:
+                continue  # too little to say anything with
+            lv = sorted(g["levels"])
+            out.append({
+                "verbs": g["verbs"],
+                "fights": g["fights"],
+                "dps": round(g["damage"] / g["seconds"], 1),
+                "avg_hit": round(g["damage"] / max(g["hits"], 1), 1),
+                # HITS, not swings: ability rows count landed blows only, so a
+                # missed off-hand swing is invisible here. Naming it
+                # "swings" made a real off-hand look weaker than it is.
+                "hits_per_min": round(g["hits"] / (g["seconds"] / 60), 1),
+                "level_lo": lv[0] if lv else None,
+                "level_hi": lv[-1] if lv else None,
+            })
+        return sorted(out, key=lambda x: -x["fights"])
+
+    groups = collect()
+    overlap = None
+    lvls = [lv for r in rows if (lv := (r.payload or {}).get("level"))]
+    if lvls:
+        # the band around the levels most recently played, where a
+        # comparison is least polluted by having simply been stronger
+        recent = lvls[0]
+        inband = collect(recent - band, recent + band)
+        if len(inband) > 1:
+            overlap = {"level_lo": recent - band, "level_hi": recent + band,
+                       "groups": inband}
+    classes = [c.strip() for c in
+               (getattr(tracker, "class_str", "") or "").split("/") if c.strip()]
+    lv_now = lvls[0] if lvls else None
+    return {"groups": groups, "overlap": overlap,
+            "dual_wield_ceiling": (_c := _dual_wield_ceiling(classes, lv_now)),
+            "ambidexterity": _ambidexterity_owned(),
+            # both readings of the AA text, because it does not say which
+            "ceiling_with_aa": (None if _c is None or not _ambidexterity_owned()
+                                else {"as_points": round(min(1.0, _c + 0.32), 2),
+                                      "as_relative": round(min(1.0, _c * 1.32), 2)}),
+            "level": lv_now,
+            "note": "Weapon swings only — kick, bash, smite and the monk "
+                    "strike/punch line are class skills on their own timers, "
+                    "and spell damage sometimes uses a melee verb. Hands are "
+                    "NOT inferred: two weapons of the same type both log one "
+                    "verb, and a second weapon adds far less than double "
+                    "because the off-hand only swings when a skill check "
+                    "passes. Compare the rates against the ceiling instead."}
+
+
+def _launch_bound() -> str:
+    """String bound separating this era's rows from beta ones.
+
+    Beta play belongs to a character that need not have survived launch, so
+    it must not describe the one playing now. This lived only inside
+    /api/lifetime, which meant lifetime totals excluded beta while the
+    encounter list, session history and trio comparison all still showed
+    it -- the same rows, two different stories.
+
+    Stored ts uses a SPACE separator ("2026-07-05 13:16:57") and the
+    setting is ISO with a "T"; compared as strings the mismatch silently
+    matches nothing, which has bitten this codebase more than once.
+    """
+    return (settings.eql_launch_iso or "").replace("T", " ") or "0000"
+
+
 @app.get("/api/encounters")
 async def get_encounters(limit: int = 50, db: Session = Depends(get_db)):
     """Persisted fight history for this character (newest first)."""
@@ -980,7 +1310,8 @@ async def get_encounters(limit: int = 50, db: Session = Depends(get_db)):
         return {"encounters": []}
     rows = (db.query(LogEventRow)
             .filter(LogEventRow.character_id == _character_id,
-                    LogEventRow.event_type == "encounter")
+                    LogEventRow.event_type == "encounter",
+                    LogEventRow.ts >= _launch_bound())
             .order_by(LogEventRow.id.desc()).limit(limit).all())
     return {"encounters": [r.payload for r in rows]}
 
@@ -1251,6 +1582,11 @@ async def api_settings_get():
         "packaged": is_frozen(),
         "llm": {
             "active": active(),
+            # LM Studio is the only provider whose model was absent here --
+            # it appeared solely as active.model, so the settings panel had
+            # nothing to seed its field from unless it was already active,
+            # and fell through to showing the OpenAI model instead.
+            "lmstudio_model": model_for("lmstudio"),
             "openai_model": openai_model(),
             "custom_model": custom_model(),
             "custom_base_url": settings.custom_base_url,
@@ -1327,11 +1663,21 @@ async def api_settings_set(body: dict):
             settings.eql_maps_custom_dir = str(game / "maps" / "Dark Brewall")
             clear_find_cache()
 
+    llm_touched = False
     if "llm_provider" in config_in:
-        set_active(str(config_in["llm_provider"]),
-                   config_in.get("openai_model") or config_in.get("custom_model")
-                   or config_in.get("claude_cli_model")
-                   or config_in.get("codex_cli_model"))
+        # Forward the model under the key THIS provider uses. Only openai
+        # and custom were passed before, so for the others set_active saw
+        # None and left llm_config.json untouched -- while the panel wrote
+        # app_config.json. model_for() prefers llm_config, so a stale value
+        # there silently outranked what the user had just saved.
+        prov = str(config_in["llm_provider"])
+        per_provider = {"openai": "openai_model", "custom": "custom_model",
+                        "local": "ollama_model", "anthropic": "anthropic_model",
+                        "lmstudio": "model",
+                        "claude_cli": "claude_cli_model",
+                        "codex_cli": "codex_cli_model"}
+        set_active(prov, config_in.get(per_provider.get(prov, "")))
+        llm_touched = True
     # keep the runtime layer in step: llm_config wins over settings at use
     # time, so an effort saved here must also land there or a stale runtime
     # choice silently shadows it
@@ -1339,6 +1685,10 @@ async def api_settings_set(body: dict):
     for cli_p in ("claude_cli", "codex_cli"):
         if f"{cli_p}_effort" in config_in:
             set_cli_prefs(cli_p, effort=str(config_in[f"{cli_p}_effort"]))
+            llm_touched = True
+    if llm_touched:
+        # effort rides the briefing the same way the model does, so a
+        # changed one invalidates a cached consult just as a switch does
         global _advice_cache, _gear_cache
         _advice_cache = None
         _gear_cache = None
@@ -1599,6 +1949,10 @@ def _gear_ctx(inv=None) -> dict:
             "pet_classes": tracker.pet_classes,
             "pet_inventory": dict(tracker.pet_inventory),
             "max_hp": tracker.max_hp, "max_mana": tracker.max_mana,
+            # attribute caps read off the Inventory panel, when that feed is
+            # on: a point past 510 does nothing, and the comparison needs to
+            # know before it recommends an item for stats with no effect
+            "ocr_stats": dict(tracker.ocr_stats),
             "combat": tracker.combat_profile()}
 
 
@@ -1780,7 +2134,8 @@ async def trio_compare(db: Session = Depends(get_db)):
         return {"trios": []}
     rows = (db.query(LogEventRow)
             .filter(LogEventRow.character_id == _character_id,
-                    LogEventRow.event_type == "encounter")
+                    LogEventRow.event_type == "encounter",
+                    LogEventRow.ts >= _launch_bound())
             .order_by(LogEventRow.ts.desc()).limit(2000).all())
     rows = list(reversed(rows))   # oldest -> newest: stints and "newest
                                   # spelling wins" both need forward time
@@ -1852,7 +2207,8 @@ async def get_sessions(limit: int = 12, db: Session = Depends(get_db)):
     if _character_id:
         q = (db.query(LogEventRow)
              .filter(LogEventRow.character_id == _character_id,
-                     LogEventRow.event_type == "session")
+                     LogEventRow.event_type == "session",
+                     LogEventRow.ts >= _launch_bound())
              .order_by(LogEventRow.ts.desc()).limit(limit).all())
         rows = [r.payload for r in q]
     return {"current": current, "history": rows}
@@ -1879,7 +2235,7 @@ async def get_lifetime(db: Session = Depends(get_db)):
     # numbers with someone else's history. Stored ts uses a SPACE separator
     # ("2026-07-05 13:16:57") while the setting is ISO with a "T" — compared
     # as strings, the mismatch silently matches nothing.
-    since = (settings.eql_launch_iso or "").replace("T", " ") or "0000"
+    since = _launch_bound()
 
     def count(kind: str) -> int:
         return (db.query(LogEventRow)
@@ -2086,6 +2442,90 @@ async def ocr_set_enabled(body: OcrEnabled):
     return ocr_watcher.status()
 
 
+@app.get("/api/ocr/group-preview")
+async def ocr_group_preview():
+    """One raw read of the Group window, for calibration.
+
+    Returns the text verbatim and does NOT try to interpret it yet. The
+    stats parser was written from a guess at its panel's layout, passed
+    every fixture invented alongside it, and read nothing useful from the
+    actual game -- so this one gets written against a real capture of both
+    states (solo and grouped) or not at all.
+    """
+    from backend.ocr_system import _capture_group
+    cfg = ocr_load_config()
+    try:
+        text = await asyncio.to_thread(_capture_group, cfg)
+    except Exception as exc:
+        return {"error": str(exc)[:160]}
+    return {"text": (text or "")[:600],
+            "region": {k: cfg["group_" + k]
+                       for k in ("left", "top", "width", "height")}}
+
+
+@app.post("/api/ocr/group-region")
+async def post_ocr_group_region(body: dict):
+    cfg = ocr_load_config()
+    for k in ("left", "top", "width", "height"):
+        if body.get(k) is not None:
+            cfg["group_" + k] = int(body[k])
+    if body.get("group_interval") is not None:
+        cfg["group_interval"] = int(body["group_interval"])
+    ocr_save_config(cfg)
+    return {"ok": True, "region": {k: cfg["group_" + k]
+                                   for k in ("left", "top", "width", "height")}}
+
+
+@app.get("/api/ocr/stats-preview")
+async def ocr_stats_preview():
+    """One read of the stat panel, reporting WHY it failed if it did.
+
+    The yellow ratio is returned either way: a gated-out read and a bad
+    region look identical from the outside, and the number is the only
+    thing that tells them apart.
+    """
+    from backend.ocr_system import _capture_stats, parse_stats_text
+    cfg = ocr_load_config()
+    try:
+        text, ratio = await asyncio.to_thread(_capture_stats, cfg)
+    except Exception as exc:
+        return {"error": str(exc)[:160]}
+    if text is None:
+        return {"gated": True, "yellow": round(ratio, 4),
+                "yellow_min": cfg["stats_yellow_min"],
+                "hint": "No yellow label text in the box — open the "
+                        "Inventory window, focus the Equipment tab, and "
+                        "check the box covers the stat column."}
+    return {"gated": False, "yellow": round(ratio, 4),
+            "text": (text or "")[:400], "parsed": parse_stats_text(text)}
+
+
+@app.post("/api/ocr/stats-region")
+async def post_ocr_stats_region(body: dict):
+    """Place the box over the Inventory window's stat panel."""
+    cfg = ocr_load_config()
+    for k in ("left", "top", "width", "height"):
+        if body.get(k) is not None:
+            cfg["stats_" + k] = int(body[k])
+    if body.get("stats_interval") is not None:
+        cfg["stats_interval"] = int(body["stats_interval"])
+    if body.get("stats_yellow_min") is not None:
+        cfg["stats_yellow_min"] = float(body["stats_yellow_min"])
+    ocr_save_config(cfg)
+    return {"ok": True, "region": {k: cfg["stats_" + k]
+                                   for k in ("left", "top", "width", "height")},
+            "stats_interval": cfg["stats_interval"],
+            "stats_yellow_min": cfg["stats_yellow_min"]}
+
+
+@app.post("/api/ocr/stats-enabled")
+async def post_ocr_stats_enabled(body: dict):
+    cfg = ocr_load_config()
+    cfg["stats_enabled"] = bool(body.get("enabled"))
+    ocr_save_config(cfg)
+    return {"ok": True, "stats_enabled": cfg["stats_enabled"]}
+
+
 @app.get("/api/ocr/preview")
 async def ocr_preview():
     """One-shot capture + OCR of the configured region (for calibration)."""
@@ -2259,12 +2699,18 @@ async def overlay_prefs_set(body: dict):
 
 
 @app.post("/api/ocr/overlay")
-async def ocr_launch_overlay():
-    """Launch the on-screen calibration box (backend/ocr_overlay.py)."""
+async def ocr_launch_overlay(body: dict | None = None):
+    """Launch the on-screen calibration box (backend/ocr_overlay.py).
+
+    `target: "stats"` places the Inventory stat-panel box instead of the
+    position box -- same tool, same config file, different keys.
+    """
     import subprocess
     import sys as _sys
+    _t = (body or {}).get("target")
+    extra = ["--target", _t] if _t in ("stats", "group") else []
     subprocess.Popen(
-        child_command("backend.ocr_overlay", "--ocr-overlay"),
+        [*child_command("backend.ocr_overlay", "--ocr-overlay"), *extra],
         cwd=str(child_cwd()),
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )

@@ -31,7 +31,6 @@ import urllib.request
 from pathlib import Path
 
 API_CHAR = "http://localhost:8000/api/character"
-API_ENCS = "http://localhost:8000/api/encounters?limit=5"
 from backend import overlay_prefs
 from backend.paths import data_path
 
@@ -121,42 +120,34 @@ def _fight_rows(enc):
     return allies
 
 
-def compute_rows(snap, history, segment):
-    """[(name, classes, damage, dps)] ranked by damage, plus fight label."""
-    if segment == "current":
-        enc = (snap or {}).get("encounter")
-        if not enc:
-            return [], "no encounter"
-        rows = [(a.get("name") or "?", a.get("classes"),
-                 a.get("damage", 0), a.get("dps", 0))
-                for a in _fight_rows(enc)]
-        # Damage the group filter excluded, as ONE row. Shown rather than
-        # dropped: a silently missing contributor is indistinguishable from
-        # a quiet fight, and the filter can be wrong -- an unmapped
-        # groupmate's pet has a generated name that proves nothing.
-        ua = enc.get("unattributed")
-        if ua and ua.get("damage"):
-            n = ua.get("sources") or 0
-            rows.append((f"(filtered · {n} source{'' if n == 1 else 's'})",
-                         None, ua["damage"], 0))
-        foes = enc.get("foes") or []
-        label = (f"{len(foes)} foes" if len(foes) > 1
-                 else (enc.get("target") or "fight"))
-        label = f"{label} · {enc.get('duration', 0):g}s"
-    else:
-        dmg, secs, cls = {}, {}, {}
-        for enc in history or []:
-            dur = enc.get("duration") or 0
-            for a in _fight_rows(enc):
-                n = a.get("name") or "?"
-                dmg[n] = dmg.get(n, 0) + (a.get("damage") or 0)
-                secs[n] = secs.get(n, 0) + dur
-                cls.setdefault(n, a.get("classes"))
-        rows = [(n, cls.get(n), d, round(d / secs[n], 1) if secs.get(n) else 0)
-                for n, d in dmg.items()]
-        label = f"last {len(history or [])} fights"
+def compute_rows(snap):
+    """[(name, classes, damage, dps)] for the CURRENT fight, plus a label.
+
+    Current-fight only, deliberately. The overlay is a glance surface —
+    "how am I doing right now" — and a last-5 aggregate answers a
+    different, slower question that the web Encounter panel has the room
+    to answer properly. Carrying both here meant a toggle, a persisted
+    mode, and a poller fetching five encounters a second time.
+    """
+    enc = (snap or {}).get("encounter")
+    if not enc:
+        return [], "no encounter", None
+    rows = [(a.get("name") or "?", a.get("classes"),
+             a.get("damage", 0), a.get("dps", 0))
+            for a in _fight_rows(enc)]
+    foes = enc.get("foes") or []
+    label = (f"{len(foes)} foes" if len(foes) > 1
+             else (enc.get("target") or "fight"))
+    label = f"{label} · {enc.get('duration', 0):g}s"
     rows.sort(key=lambda r: r[2], reverse=True)
-    return rows[:8], label
+    # Excluded damage is NOT a row. It was one, and it read as a person:
+    # numbered, bar-charted, counted in the share percentage, and its name
+    # truncated to "(filtered · 1 s". A footnote cannot be mistaken for a
+    # contributor and cannot distort the ranking above it.
+    ua = enc.get("unattributed") or {}
+    filtered = ((ua.get("damage"), ua.get("sources") or 0)
+                if ua.get("damage") else None)
+    return rows[:8], label, filtered
 
 
 def timer_rows(snap, prefs=None):
@@ -256,7 +247,7 @@ def progress_rows(snap, prefs=None):
                      f"active {r.get('active_hours', 0):g}h", "", MUTED))
     return rows
 
-def section_summary(key, snap, history, segment):
+def section_summary(key, snap):
     """One-liner shown on a COLLAPSED section header."""
     if key == "combat":
         return f"{(snap or {}).get('dps', 0):g} dps"
@@ -283,11 +274,9 @@ def section_summary(key, snap, history, segment):
 class OverlayMeter:
     def __init__(self) -> None:
         self.snap = None
-        self.history = []
         self.prefs = overlay_prefs.load()
         st = self._load_state()
         self.mode = st.get("mode", "damage")          # damage | dps
-        self.segment = st.get("segment", "current")   # current | last5
         self.compact = bool(st.get("compact", False))
         self.alpha = min(1.0, max(0.35, float(st.get("alpha", 0.90))))
         self.collapsed = {k: bool(st.get("collapsed", {}).get(k, False))
@@ -321,7 +310,6 @@ class OverlayMeter:
         self.root.bind("<KeyPress>", self._key)
 
         threading.Thread(target=self._poll_char, daemon=True).start()
-        threading.Thread(target=self._poll_encounters, daemon=True).start()
         threading.Thread(target=self._watch_game, daemon=True).start()
         self.root.after(300, self._render)
 
@@ -339,7 +327,7 @@ class OverlayMeter:
                 "x": self.root.winfo_x(), "y": self.root.winfo_y(),
                 "alpha": round(self.alpha, 2), "compact": self.compact,
                 "collapsed": self.collapsed, "pinned": self.pinned,
-                "mode": self.mode, "segment": self.segment,
+                "mode": self.mode,
             }), encoding="utf-8")
         except Exception:
             pass
@@ -363,11 +351,10 @@ class OverlayMeter:
     def _release(self, e) -> None:
         if not self._moved:
             if e.y <= HEADER_H:
-                if e.x < W // 2:
-                    self.mode = "dps" if self.mode == "damage" else "damage"
-                else:
-                    self.segment = ("last5" if self.segment == "current"
-                                    else "current")
+                # the WHOLE header toggles Damage/DPS now; the right half
+                # used to switch to a last-5 aggregate that no longer
+                # exists here
+                self.mode = "dps" if self.mode == "damage" else "damage"
             else:
                 for y0, y1, key in self._sec_zones:
                     if y0 <= e.y <= y1:
@@ -471,16 +458,6 @@ class OverlayMeter:
                 self.snap = None
             time.sleep(1.0)
 
-    def _poll_encounters(self) -> None:
-        while True:
-            try:
-                with urllib.request.urlopen(API_ENCS, timeout=3) as r:
-                    d = json.loads(r.read().decode("utf-8"))
-                self.history = d.get("encounters", d) if isinstance(d, dict) else d
-            except Exception:
-                pass
-            time.sleep(5.0)
-
     def _watch_game(self) -> None:
         """Close the overlay when eqgame.exe exits (after it has been seen
         running at least once — launching the overlay first is fine)."""
@@ -510,7 +487,7 @@ class OverlayMeter:
                       font=("Consolas", 7, "bold"),
                       text=f"{arrow} {title}")
         summary = extra if not self.collapsed[key] else section_summary(
-            key, self.snap, self.history, self.segment)
+            key, self.snap)
         if summary:
             c.create_text(W - 18, y + SEC_H // 2, anchor="e", fill=MUTED,
                           font=("Consolas", 7), text=summary[:32])
@@ -645,7 +622,7 @@ class OverlayMeter:
         c.delete("all")
         self._sec_zones = []
 
-        rows, label = compute_rows(self.snap, self.history, self.segment)
+        rows, label, filtered = compute_rows(self.snap)
         s = (self.snap or {}).get("session") or {}
         r = (self.snap or {}).get("rates") or {}
         my_dps = (self.snap or {}).get("dps", 0)
@@ -659,7 +636,7 @@ class OverlayMeter:
                       and overlay_prefs.on(self.prefs, k)]
             if pinned:
                 header = " | ".join(
-                    section_summary(k, self.snap, self.history, self.segment)
+                    section_summary(k, self.snap)
                     for k in pinned)
             else:
                 # Built from what is switched on, so the one-line strip
@@ -773,6 +750,13 @@ class OverlayMeter:
                         c.create_text(W - 6, y0 + ROW_H // 2, anchor="e",
                                       fill=fg, font=("Consolas", 9), text=val)
                     y += len(rows) * ROW_H
+                    if filtered:
+                        dmg, n_src = filtered
+                        c.create_text(6, y + TROW_H // 2, anchor="w",
+                                      fill=MUTED, font=("Consolas", 7),
+                                      text=f"+{_fmt(dmg)} from {n_src} "
+                                           f"not in your group")
+                        y += TROW_H
 
             for key, title in (("timers", "TIMERS"), ("session", "SESSION"),
                                ("loot", "LOOT"), ("progress", "PROGRESS")):
@@ -790,17 +774,25 @@ class OverlayMeter:
                     y = self._text_rows(c, y, loot_rows(self.snap, prefs))
                 else:
                     y = self._text_rows(c, y, progress_rows(self.snap, prefs))
+        # TWO lines when interactive. The single line was 455px of
+        # Consolas in a 300px window, so everything past "opacity" -- the
+        # lock and close shortcuts, the two you most need when the thing
+        # is in your way -- was simply off the edge with nothing to
+        # suggest more existed. Both lines are measured to fit inside W.
         hint_y = y + HINT_H // 2
         if interactive:
             c.create_text(6, hint_y, anchor="w", fill=GOLD,
                           font=("Consolas", 7),
-                          text="MOVABLE · section=fold · *=pin · c=compact "
-                               "· ±=opacity · Ctrl+Alt+X=lock · dbl-click closes")
+                          text="MOVABLE · header=dmg/dps · section=fold · *=pin")
+            c.create_text(6, hint_y + HINT_H, anchor="w", fill=GOLD,
+                          font=("Consolas", 7),
+                          text="c=compact · ±=opacity · Ctrl+Alt+X=lock · dbl=close")
+            height = y + HINT_H * 2
         else:
             c.create_text(6, hint_y, anchor="w", fill=MUTED,
                           font=("Consolas", 7),
                           text="click-through · Scroll Lock ON to interact")
-        height = y + HINT_H
+            height = y + HINT_H
         self.root.geometry(f"{W}x{height}")
         c.configure(height=height)
         self.root.after(500, self._render)

@@ -10,7 +10,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import Optional
 
-from backend import alerts, spell_file
+from backend import alerts, builds_data, race_unlocks, spell_file
 from backend.alert_data import (ABILITY_COOLDOWNS, BASE_DURATION_ROWS,
                                 COOLDOWN_SHAVES, SPELL_TIMERS,
                                 TIER_DURATION_RATE)
@@ -21,6 +21,29 @@ logger = logging.getLogger(__name__)
 
 DPS_WINDOW_SECONDS = 60
 COMBAT_TIMEOUT_SECONDS = 8
+
+# How far past YOUR last action a groupmate's swings may hold the fight
+# open. A group fight does not pause because you ran out of mana, went to
+# heal, or died -- but an unbounded extension would let a busy zone hold
+# one "encounter" open all night, and the DPS clock would run through
+# every quiet stretch. Bounded per EQBuddy, which uses ~20s for the same
+# reason. Only CONFIRMED groupmates extend: before the roster was
+# trustworthy this could not be done at all.
+GROUP_EXTEND_SECONDS = 20
+
+# How long a filtered contributor stays on the "not counted" list after
+# their last hit. Long enough to decide, short enough that the list stays
+# a question rather than a session ledger.
+FILTERED_TTL_S = 300
+
+# EQL groups hold FOUR, not the six of the EverQuest this is reimagined
+# from. Player-supplied and worth writing down: nothing in the log states
+# it, and assuming the classic number is the same mistake the wiki's
+# classic-era item pages make. Used as a WARNING, never a cap -- the
+# roster gates the meter and extends the combat clock, so silently
+# dropping a name would hide damage, while an over-full roster only means
+# something needs a look.
+GROUP_CAP = 4
 LEDGER_SIZE = 300
 REWARD_WINDOW_SECONDS = 3  # XP/coin <-> kill attribution window
 
@@ -70,6 +93,11 @@ def _tier_scaled(base: str, secs: int, cast_name: str) -> int:
     if tier <= 0 or base not in BASE_DURATION_ROWS:
         return secs
     return int(secs * (1 + TIER_DURATION_RATE * tier))
+
+
+# "A froglok ghoul", "the guard" -- an attacker carrying an article is an
+# NPC, never a player.
+_NPC_NAME = re.compile(r"^(?:[Aa]n?|[Tt]he) ")
 
 
 def _foe_key(name: str) -> str:
@@ -154,6 +182,31 @@ class CharacterTracker:
         # cannot disprove. Not persisted: a restart re-opens the filter,
         # which is the safe direction.
         self.group_members: set = set()  # flush loop persists when set
+        # Everyone whose damage we HID, with enough context to judge them:
+        # how many of our fights they turned up in. A groupmate who never
+        # speaks is invisible to every automatic signal, but they are in
+        # nearly every fight -- so the count is the tell, and the player is
+        # the only one who can read it. Survives restarts with the roster.
+        self.filtered_seen: dict = {}
+        # class -> the class-unique spell that proved it. Evidence only:
+        # never written into class_str (see _infer_class).
+        # Names the player said are NOT grouped. Held until EVIDENCE
+        # contradicts it -- a join line, an invite, a word in group chat --
+        # because those are the signals that would have added them anyway,
+        # and a dismissal should not outlive the thing it was about.
+        self.ignored_contributors: dict = {}
+        # Inventory-panel numbers read from the screen (optional OCR)
+        # race-unlock turn-ins seen this session: item -> tally + where it goes
+        self.unlock_loot: dict = {}
+        self._unlock_alerted: set = set()
+        self.ocr_stats: dict = {}
+        self.ocr_stats_at = None
+        # anyone who has spoken in any channel -- pets never do
+        self._chat_seen: set = set()
+        self.inferred_classes: dict = {}
+        self._infer_at: dict = {}
+        self._infer_seen: set = set()
+        self.session_fights = 0
         self._aa_from_db = False       # roster restored from DB, not the log
         # Owned AA ranks from '/alternateadv list' (one line per rank)
         self.owned_aas: dict[str, dict] = {}
@@ -219,7 +272,9 @@ class CharacterTracker:
                 self.pending_encounters.append(
                     self._encounter_view(self.encounter, live=False))
                 del self.pending_encounters[:-10]
-            self.encounter = {"started": ts, "last": ts, "target": None,
+            self.session_fights += 1
+            self.encounter = {"started": ts, "last": ts, "last_own": ts,
+                              "target": None,
                               "total_out": 0, "total_in": 0, "abilities": {},
                               "foes": {}, "trio": self.class_str,
                               # captured HERE, not at flush time: a fight
@@ -229,6 +284,173 @@ class CharacterTracker:
                               "zone": self.zone, "level": self.level}
         else:
             self.encounter["last"] = ts
+            # ...and OUR clock, which is what bounds how long a groupmate
+            # may hold the fight open. Kept apart from "last" so their
+            # damage cannot bootstrap its own extension window.
+            self.encounter["last_own"] = ts
+
+    def _note_unlock_loot(self, item: str, count: int, ts: datetime) -> None:
+        """Flag loot that is a race-unlock turn-in, and keep a running tally.
+
+        Nothing in the game says this at the moment it matters. A Gnoll Fang
+        reads as vendor trash and is 1/1200th of a Barbarian, and the cost of
+        not knowing is not a wasted click -- it is having sold four hundred
+        of them.
+
+        Alerted ONCE per item per session. These drop in bulk by design, so
+        alerting per loot would bury every other alert under the very grind
+        it is describing; the tally on the panel carries the repeats.
+        """
+        rec = race_unlocks.match(item)
+        if not rec:
+            return
+        prog = self.unlock_loot.setdefault(
+            rec["item"], {"count": 0, "race": rec["race"], "npc": rec["npc"],
+                          "zone": rec["zone"], "total": rec.get("total"),
+                          "factions": rec.get("factions") or [],
+                          "note": rec.get("note")})
+        prog["count"] += count
+        if rec["item"] in self._unlock_alerted:
+            return
+        self._unlock_alerted.add(rec["item"])
+        need = rec.get("total")
+        self._push_alert(
+            "unlock",
+            f"{rec['item']} — {rec['race']} unlock turn-in "
+            f"({rec['npc']}, {rec['zone']}"
+            + (f"; {need} needed)" if need else ")"),
+            ts)
+
+    def _looks_like_pet(self, name: str) -> bool:
+        """No player evidence for a name that is fighting alongside us.
+
+        A groupmate's pet with a generated name ("Jabeker hits X") is
+        TEXTUALLY IDENTICAL to a player, so there is no hard signal --
+        EQLogParser reaches the same conclusion. What we do have is the
+        absence of player evidence: a real player in the zone turns up in
+        /who and usually says something eventually, while a pet does
+        neither, ever.
+
+        Only applied once we HAVE /who data. With an empty roster this
+        would call everyone a pet, which is the failure it exists to
+        prevent. And it never drops anyone -- these move to their own
+        group, because the one case it gets wrong is a silent groupmate
+        who was not in the /who, and that is precisely who the list is for.
+        """
+        if not self.who_roster:
+            return False
+        if name in self.who_roster or name in self.group_members:
+            return False
+        return name not in self._chat_seen
+
+    def apply_ocr_stats(self, stats: dict) -> None:
+        """Adopt numbers read off the Inventory panel.
+
+        max_hp and max_mana were previously TYPED IN by the player -- the
+        log never prints them -- and everything else here (AC, ATK, the
+        attributes, the resists) had no source at all. This is the only
+        place the app can learn them without asking.
+
+        Screen-read, so treated as a reading and not as truth: values are
+        kept under `ocr_stats` with their own timestamp, and only max_hp /
+        max_mana are promoted into the fields the rest of the app uses --
+        and only when the player has not set them by hand, since a typed
+        value is a deliberate statement and a misread is not.
+        """
+        if not stats:
+            return
+        self.ocr_stats = dict(stats)
+        self.ocr_stats_at = self.last_event_at
+        for src, dest, manual in (("max_hp", "max_hp", "_max_hp_manual"),
+                                  ("max_mana", "max_mana", "_max_mana_manual")):
+            v = stats.get(src)
+            if v and v > 0 and not getattr(self, manual, False):
+                setattr(self, dest, v)
+
+    def trust_all(self, action: str) -> dict:
+        """Apply one verdict to everyone currently on the not-counted list.
+
+        Server-side rather than a loop of single calls from the browser:
+        the list ages and grows as the log moves, so a client iterating a
+        snapshot it fetched a moment ago would act on names that have since
+        left it and miss ones that arrived.
+        """
+        names = [r["name"] for r in self.filtered_view()]
+        for n in names:
+            self.trust_member(n, action == "add", action=action)
+        return {"ok": True, "action": action, "names": names,
+                "group": sorted(self.group_members),
+                "over_cap": len(self.group_members) > GROUP_CAP}
+
+    def _infer_class(self, spell: str, ts=None) -> None:
+        """Learn a class from a spell only WE could have cast.
+
+        Class stays unknown until someone types /who, which gates the whole
+        advisor -- but 80% of the ~1200 spells in the builds dataset belong
+        to exactly one class, and casting one is proof. EQLogParser
+        (Apache-2.0) ranks its class signals roster > targeting > /who >
+        class-unique spell for the same reason; this is that last rung.
+
+        Deliberately does NOT write class_str. A cast proves a class is IN
+        the trio, never which of three slots it fills nor what the other
+        two are, so writing a partial trio would state more than the
+        evidence supports -- and class_str already has two writers whose
+        orderings disagree. This records the evidence and lets the player
+        confirm it.
+        """
+        if not spell:
+            return
+        base = strip_tier(spell)
+        if base.lower() in self._infer_seen:
+            return
+        self._infer_seen.add(base.lower())
+        try:
+            owners = builds_data.spell_levels(base) or {}
+        except Exception:
+            return
+        if len(owners) != 1:
+            return  # shared spell lines prove nothing
+        cls = next(iter(owners))
+        self.inferred_classes[cls] = base
+        self._infer_at[cls] = ts or self._infer_at.get(cls)
+
+    def inferred_view(self) -> list[dict]:
+        """Classes proven this session, most recently proven first."""
+        rows = [{"cls": c, "spell": sp, "at": self._infer_at.get(c)}
+                for c, sp in self.inferred_classes.items()]
+        rows.sort(key=lambda r: (r["at"] is not None, r["at"]), reverse=True)
+        return [{"cls": r["cls"], "spell": r["spell"]} for r in rows[:3]]
+
+    def _adopt_pet_damage(self, pet: str) -> None:
+        """Move damage this pet already dealt out of the ALLY bucket.
+
+        A pet fights before it identifies itself: its first swings land
+        while it is still an unknown name, so they are credited to
+        `allies`, and the mapping that arrives later only redirects FUTURE
+        damage to `own_pet`. The meter then showed the same pet twice --
+        "Jabekn (pet)" for what came after, plain "Jabekn" for what came
+        before, the second looking exactly like another player.
+
+        total_out is raised by the same amount because the ally bucket
+        never fed it: the damage was ours all along and was simply filed
+        under a stranger. Without that the "You" row, computed as
+        total_out minus the pet total, would drop by whatever we adopted.
+        """
+        enc = self.encounter
+        if not enc:
+            return
+        moved = (enc.get("allies") or {}).pop(pet, 0)
+        # A CHARMED pet was never in the ally bucket: an NPC-shaped attacker
+        # we cannot tie to us is held in npc_pending instead, so that the
+        # thousands of mob-vs-mob swings in a busy zone do not read as
+        # "contributors we hid from you". Claim it here on the same terms.
+        moved += (enc.get("npc_pending") or {}).pop(pet, 0)
+        if not moved:
+            return
+        op = enc.setdefault("own_pet", {})
+        op[pet] = op.get(pet, 0) + moved
+        enc["total_out"] = enc.get("total_out", 0) + moved
+        self.damage_dealt += moved
 
     def _mob(self, mob: str) -> dict:
         stats = self.mob_stats.setdefault(
@@ -357,7 +579,21 @@ class CharacterTracker:
                 self.class_str = e.class_str
                 self.unknown_casts.clear()
                 self.loadout_hint = None
-            self.race = self.race or e.race
+            if e.race:
+                # Take EVERY race /who reports, not just the first. This was
+                # write-once, guarding against raid /who rows -- which print
+                # the group number where a zone /who prints the race, so the
+                # parser sets race None there and an overwrite would blank
+                # it. Testing for a value covers that without latching.
+                #
+                # Race genuinely changes: a character need not survive a
+                # launch, and the name gets reused. The reporting player
+                # was an Iksar in beta and is an Ogre now, and the beta
+                # value -- restored from the character row at startup --
+                # outranked fourteen /who lines that said otherwise. The
+                # advisor gates gear and race-influenced class advice on
+                # this, so it was wrong in a way that reached real output.
+                self.race = e.race
         elif isinstance(e, ev.OtherCharInfo):
             self.who_roster[e.name] = {"level": e.level, "classes": e.classes}
         elif isinstance(e, ev.PetInvHeader):
@@ -374,6 +610,8 @@ class CharacterTracker:
                 self.pet_hint = False
             if self.pet_owners.get(e.pet) != e.owner:
                 self.pet_owners[e.pet] = e.owner
+                if (e.owner or "").lower() == (self.name or "").lower():
+                    self._adopt_pet_damage(e.pet)   # /pet leader path
                 self.pet_owners_dirty = True
         elif isinstance(e, ev.PetAttack):
             # the pet tells ONLY its master — zero-config mapping, no
@@ -382,10 +620,12 @@ class CharacterTracker:
             if self.pet_owners.get(e.pet) != self.name:
                 self.pet_owners[e.pet] = self.name
                 self.pet_owners_dirty = True
+                self._adopt_pet_damage(e.pet)
         elif isinstance(e, ev.CastBegin):
             if e.spell:  # log evidence for proc-vs-cast disambiguation
                 self.spell_casts.add(e.spell.lower())
                 self.spell_casts.add(strip_tier(e.spell).lower())
+                self._infer_class(e.spell, e.ts)
                 if live:
                     base = strip_tier(e.spell).lower()
                     if base in ABILITY_COOLDOWNS:
@@ -413,14 +653,21 @@ class CharacterTracker:
                 self.group_members.clear()   # removed/disbanded
             elif e.joined:
                 self.group_members.add(e.name)
+                # A join line is proof, and proof outranks a dismissal made
+                # before it: whoever was ignored has now demonstrably
+                # joined, so the ignore has nothing left to describe.
+                self.ignored_contributors.pop(e.name, None)
             else:
                 self.group_members.discard(e.name)
         elif isinstance(e, ev.GroupChat):
             # Seeds the roster where join lines cannot: log in ALREADY
             # grouped and no one ever "joined", so a join-only filter would
             # hide your real group. Speaking in group chat proves membership.
+            if e.sender:
+                self._chat_seen.add(e.sender)
             if e.channel == "group" and e.sender:
                 self.group_members.add(e.sender)
+                self.ignored_contributors.pop(e.sender, None)
         elif isinstance(e, ev.Composition):
             # the log's own trio line — authoritative like /who
             from backend.log_system.parser import CLASS_ABBREV as _CA
@@ -553,17 +800,61 @@ class CharacterTracker:
                         # else's). Group membership is the only side of that
                         # comparison we can positively verify.
                         #
-                        # An EMPTY roster means no evidence, so it FAILS
-                        # OPEN and credits everyone exactly as before.
-                        # Filtered damage is LUMPED, never dropped: a
-                        # silently missing row looks identical to a quiet
-                        # fight, and this gate can be wrong (an unmapped
-                        # groupmate's pet has a generated name that proves
-                        # nothing, so it lands here too).
+                        # EQL does not allow shared damage: once a mob is
+                        # tagged, only the tagger and their group can hurt
+                        # it. So a non-groupmate landing hits is not helping
+                        # on our mob -- they are DEFINITIONALLY on a
+                        # different one that happens to share a name. There
+                        # is no case where crediting a stranger is correct.
+                        #
+                        # This gate therefore fails CLOSED. It used to fail
+                        # open on an empty roster, which read as "no
+                        # evidence, so credit everyone" -- but the game rule
+                        # IS the evidence, and a solo player has no allies
+                        # by definition. Randoms kept appearing in the
+                        # overlay for exactly that reason.
+                        #
+                        # The cost is a real groupmate landing in the bucket
+                        # when we never saw them join (logging in already
+                        # grouped, before anyone speaks). That is why the
+                        # damage is LUMPED and shown rather than dropped: a
+                        # wrongly-excluded contributor stays visible, and
+                        # one line of group chat fixes it.
                         who = owner or e.attacker
-                        if self.group_members and who not in self.group_members:
+                        # An NPC attacker we cannot tie to us is ambient
+                        # combat -- mobs fighting each other, or someone
+                        # else's charmed pet. Parsing those is what makes a
+                        # CHARMED pet of ours visible at all, but they must
+                        # not land in the filtered bucket: that number means
+                        # "contributors we hid from you", and burying it
+                        # under thousands of mob-vs-mob swings would make it
+                        # meaningless. Dropped outright, not counted.
+                        if (who not in self.group_members
+                                and _NPC_NAME.match(who or "")):
+                            # Ambient combat -- mobs fighting each other, or
+                            # someone else's charmed pet -- EXCEPT that our
+                            # OWN charmed pet looks exactly like this until
+                            # /pet leader identifies it, and it fights first
+                            # and identifies second. Held aside so mapping
+                            # can claim it, the same way _adopt_pet_damage
+                            # claims a summoned pet's opening swings out of
+                            # the ally bucket. Never displayed and never
+                            # summed: if no mapping arrives it was ambient
+                            # after all, and the encounter takes it away.
+                            pend = enc.setdefault("npc_pending", {})
+                            if who in pend or len(pend) < 40:
+                                pend[who] = pend.get(who, 0) + e.damage
+                            return
+                        if who not in self.group_members:
                             ua = enc.setdefault("unattributed", {})
+                            first = e.attacker not in ua
                             ua[e.attacker] = ua.get(e.attacker, 0) + e.damage
+                            seen = self.filtered_seen.setdefault(
+                                e.attacker, {"damage": 0, "fights": 0})
+                            seen["damage"] += e.damage
+                            seen["last"] = e.ts
+                            if first:
+                                seen["fights"] += 1
                         elif owner:
                             # An ally's pet gets its OWN row, mirroring the
                             # way our pet is split out of "You". Folded in,
@@ -578,6 +869,22 @@ class CharacterTracker:
                             allies = enc.setdefault("allies", {})
                             allies[e.attacker] = (
                                 allies.get(e.attacker, 0) + e.damage)
+                        if who in self.group_members or owner:
+                            # A CONFIRMED groupmate (or our own pet) keeps
+                            # the fight open past our own last swing. A
+                            # group fight does not end because we went OOM,
+                            # stepped away to heal or died -- but until the
+                            # roster could be trusted, honouring that meant
+                            # letting any passer-by hold the clock, so it
+                            # was refused outright and long fights split
+                            # into fragments whenever we stopped acting.
+                            #
+                            # Bounded by OUR last action, never by theirs,
+                            # so a fight cannot walk itself forward on
+                            # other people's damage indefinitely.
+                            own = enc.get("last_own") or enc["last"]
+                            if (e.ts - own).total_seconds() <= GROUP_EXTEND_SECONDS:
+                                enc["last"] = max(enc["last"], e.ts)
             elif isinstance(e, (ev.MeleeIn, ev.SpellDamageIn)):
                 self.damage_taken += e.damage
                 thr = alerts.bighit_threshold()
@@ -664,6 +971,13 @@ class CharacterTracker:
                 self._start_timer(e.name, e.seconds, "raid", e.ts)
             elif isinstance(e, ev.AbilityActivate):
                 self._start_cooldown(e.name, e.ts)
+            elif isinstance(e, ev.Mend):
+                # Mend announces its RESULT, never its activation -- no cast
+                # line, and unlike Lay on Hands no "you can use the ability
+                # again" readout ever prints, so nothing will correct this
+                # timer later. The heal message is the only evidence it
+                # fired, and the duration has to stand on its own.
+                self._start_cooldown("Mend", e.ts)
             elif isinstance(e, ev.CooldownReadout):
                 # the game's own remaining-time oracle — snap to it
                 self._start_timer(f"{strip_tier(e.name)} ready", e.seconds,
@@ -745,6 +1059,7 @@ class CharacterTracker:
                 self.loots.appendleft(label)
                 self.loot_count += max(e.count, 1)
                 self._fire_alerts("loot", e.item, e.ts)
+                self._note_unlock_loot(e.item, max(e.count, 1), e.ts)
                 # loot lines name the corpse: exact per-mob attribution
                 # Upgrade currency. The 2026-07-28 launch patch added
                 # "Void-touched Potential", a raid token that merges exactly
@@ -954,6 +1269,14 @@ class CharacterTracker:
         self.loot_count = 0
         self.stuns_taken = self.overheal = 0
         self.stuns_landed = self.mez_applied = 0
+        # NOT durable knowledge, unlike cast evidence: classes are swapped
+        # freely in EQL, so accumulating these across a log names every
+        # class ever played (nine, on the reporting character) instead of
+        # the three slotted now. A cast only proves a class is slotted at
+        # the time of the cast.
+        self.inferred_classes = {}
+        self._infer_at = {}
+        self._infer_seen = set()
         self.mods = {}
         self.motes = {}
         self.loots.clear()
@@ -1066,7 +1389,15 @@ class CharacterTracker:
         own_pet = enc.get("own_pet", {})
         pet_total = sum(own_pet.values())
         for pname, pdmg in own_pet.items():
-            label = pname if pname.lower() != f"{self.name} pet".lower() else "Pet"
+            # A mapped pet carries a GENERATED name (Jabekn, Kobantik), which
+            # on a meter reads exactly like another player -- and the whole
+            # point of splitting it out of "You" is that you can tell them
+            # apart. Ally pets were already tagged "<owner> (pet)"; own pets
+            # were not, so they were the one contributor row with no clue
+            # what it was. The "<name> pet" convention needs no suffix: it
+            # already says pet.
+            label = ("Pet" if pname.lower() == f"{self.name} pet".lower()
+                     else f"{pname} (pet)")
             allies.append({"name": label, "damage": pdmg,
                            "dps": round(pdmg / duration, 1),
                            "level": None, "classes": None, "is_pet": True})
@@ -1117,6 +1448,82 @@ class CharacterTracker:
         if not self.encounter:
             return None
         return self._encounter_view(self.encounter, live=True)
+
+    def filtered_view(self) -> list[dict]:
+        """Contributors we hid, and how to judge them.
+
+        `fights` over `session_fights` is the whole signal: EQL only lets
+        the tagger's group damage a mob, so someone appearing in most of
+        our pulls is almost certainly grouped -- while a passer-by fighting
+        a same-named mob shows up once or twice. That is a judgement the
+        player makes instantly and no log line states outright.
+        """
+        now = self.last_event_at
+        out = []
+        for n, v in self.filtered_seen.items():
+            if n in self.ignored_contributors:
+                continue
+            # A contributor who stopped contributing is a question that
+            # answered itself -- they zoned, died or moved on. Keeping them
+            # turns a short decision list into a session-long ledger.
+            # Measured in LOG time, so an idle night does not age out a
+            # group that is simply between pulls.
+            last = v.get("last")
+            if now and last and (now - last).total_seconds() > FILTERED_TTL_S:
+                continue
+            out.append({"name": n, "damage": v["damage"],
+                        "fights": v["fights"],
+                        "pet": self._looks_like_pet(n),
+                        "share": (round(100 * v["fights"] / self.session_fights)
+                                  if self.session_fights else 0)})
+        out.sort(key=lambda r: r["damage"], reverse=True)
+        # People first: a pet is not a decision the player can act on, and
+        # a list led by eleven of them buries the one name that is.
+        return ([r for r in out if not r["pet"]][:12]
+                + [r for r in out if r["pet"]][:12])
+
+    def trust_member(self, name: str, trust: bool = True,
+                     action: str = "") -> dict:
+        """Add or remove someone from the group roster by hand.
+
+        The automatic signals -- an invite accepted, a join line, a line of
+        group chat -- are all momentary, and a group that formed by invite
+        and plays quietly emits NONE of them. The player always knows the
+        answer, so let them say it.
+
+        Trusting ADOPTS what we already hid in the current fight, the same
+        move `_adopt_pet_damage` makes on mapping: otherwise approving
+        mid-pull shows nothing until the next one and reads as broken.
+        """
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "no name"}
+        if action == "ignore":
+            self.ignored_contributors[name] = self.last_event_at
+            self.group_members.discard(name)
+            return {"ok": True, "name": name, "ignored": True,
+                    "group": sorted(self.group_members)}
+        if not trust:
+            self.group_members.discard(name)
+            self.ignored_contributors.pop(name, None)
+            return {"ok": True, "name": name, "trusted": False,
+                    "group": sorted(self.group_members)}
+        self.ignored_contributors.pop(name, None)
+        self.group_members.add(name)
+        self.filtered_seen.pop(name, None)
+        moved = 0
+        for enc in ([self.encounter] if self.encounter else []) + list(
+                self.encounter_history):
+            ua = enc.get("unattributed") or {}
+            if name in ua:
+                dmg = ua.pop(name)
+                allies = enc.setdefault("allies", {})
+                allies[name] = allies.get(name, 0) + dmg
+                moved += dmg
+                if not ua:
+                    enc.pop("unattributed", None)
+        return {"ok": True, "name": name, "trusted": True, "adopted": moved,
+                "group": sorted(self.group_members)}
 
     def encounters_snapshot(self) -> list[dict]:
         """Current/last pull first, then previous pulls (5 total max)."""
@@ -1272,6 +1679,19 @@ class CharacterTracker:
     def _sync_hints(self, book: Optional[dict]) -> list:
         """In-game commands worth running, with why. Rendered in Vitals."""
         hints = []
+        # Class gates the whole advisor and is unknown until /who is typed.
+        # A class-unique cast proves one WITHOUT it, so say what we already
+        # worked out -- it makes the ask concrete instead of generic, and
+        # tells the player what we will not otherwise get right.
+        if not self.class_str:
+            inf = self.inferred_view()
+            if inf:
+                names = ", ".join(r["cls"] for r in inf)
+                hints.append({"command": "/who",
+                              "reason": f"Your spells this session point to "
+                                        f"{names} — /who confirms the trio "
+                                        f"and your level, which the advisor "
+                                        f"needs"})
         # Distinguish "logging was never turned on" from "logging is on but
         # quiet": both look like no data, and only one is the user's to fix.
         try:
@@ -1393,6 +1813,10 @@ class CharacterTracker:
             "position": self.position,
             "encounter": self.encounter_snapshot(),
             "encounters": self.encounters_snapshot(),
+            "filtered": self.filtered_view(),
+            "inferred_classes": self.inferred_view(),
+            "ocr_stats": dict(self.ocr_stats),
+            "unlock_loot": dict(self.unlock_loot),
             "ability_summary": self.ability_summary(),
             "session": {
                 "damage_dealt": self.damage_dealt,

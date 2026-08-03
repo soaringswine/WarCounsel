@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiSend } from "@/lib/api";
 import type { LlmProbe } from "@/lib/types";
+import { OcrSettings } from "./OcrSettings";
 import { OverlaySettings } from "./OverlaySettings";
 
 type GameVerdict = {
@@ -37,6 +38,7 @@ type SettingsData = {
   llm: {
     active: { provider: string; model: string };
     openai_model: string;
+    lmstudio_model?: string;
     custom_model: string;
     custom_base_url: string;
     lmstudio_base_url: string;
@@ -134,6 +136,41 @@ function ProbeRow({ provider, probe, probing, onCheck }: {
   );
 }
 
+/** Which model belongs to a provider.
+ *
+ * This mapping was written out twice -- once to seed the panel, once when
+ * switching provider -- and BOTH copies omitted lmstudio. One fell through
+ * to the OpenAI model and showed "o3" in the local model box; the other
+ * fell through to "" and blanked it. Two chances to be wrong about the
+ * same fact is one too many. */
+function modelFor(provider: string, llm: SettingsData["llm"]): string {
+  switch (provider) {
+    case "custom":
+      return llm.custom_model ?? "";
+    case "local":
+      return llm.ollama_model ?? "";
+    case "anthropic":
+      return llm.anthropic_model ?? "";
+    case "openai":
+      return llm.openai_model ?? "";
+    case "lmstudio":
+      return llm.lmstudio_model ?? llm.active.model ?? "";
+    case "claude_cli":
+      return llm.claude_cli_model ?? "";
+    case "codex_cli":
+      return llm.codex_cli_model ?? "";
+    default:
+      return "";
+  }
+}
+
+/** The CLI providers' effort knob — the same one-place rule as modelFor. */
+function effortFor(provider: string, llm: SettingsData["llm"]): string {
+  return provider === "codex_cli"
+    ? llm.codex_cli_effort
+    : llm.claude_cli_effort;
+}
+
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<SettingsData | null>(null);
   const [gameDir, setGameDir] = useState("");
@@ -141,6 +178,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [model, setModel] = useState("");
   const [cliEffort, setCliEffort] = useState("high");
   const [apiKey, setApiKey] = useState("");
+  // Can this browser mask a plain text field? Checked once, at mount: if it
+  // can, the key box is not a password field at all and no password manager
+  // takes an interest in it.
+  const [maskable] = useState(
+    () => typeof CSS !== "undefined"
+      && CSS.supports?.("-webkit-text-security", "disc"),
+  );
   // Ollama's host is its own field: unlike LM Studio it is commonly on
   // ANOTHER machine, so it cannot be a fixed default.
   const [ollamaUrl, setOllamaUrl] = useState("");
@@ -161,18 +205,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         setData(d);
         setGameDir(d.game.path ?? "");
         setProvider(d.llm.active.provider);
-        setModel(
-          d.llm.active.provider === "custom" ? d.llm.custom_model
-          : d.llm.active.provider === "local" ? d.llm.ollama_model
-          : d.llm.active.provider === "claude_cli" ? d.llm.claude_cli_model
-          : d.llm.active.provider === "codex_cli" ? d.llm.codex_cli_model
-          : d.llm.openai_model,
-        );
-        setCliEffort(
-          d.llm.active.provider === "codex_cli"
-            ? d.llm.codex_cli_effort
-            : d.llm.claude_cli_effort,
-        );
+        // No lmstudio branch here meant it fell through to the OpenAI
+        // model, so opening this panel with LM Studio active displayed
+        // "o3" -- a model that exists only at OpenAI -- in the local
+        // model box. Every provider names its own field now.
+        setModel(modelFor(d.llm.active.provider, d.llm));
+        setCliEffort(effortFor(d.llm.active.provider, d.llm));
         setOllamaUrl(d.llm.ollama_base_url ?? "");
         setCtxLimit(d.llm.context?.manual ?? "");
         setCustomUrl(d.llm.custom_base_url ?? "");
@@ -227,19 +265,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     (next: string) => {
       setProvider(next);
       if (!data) return;
-      setModel(
-        next === "custom" ? data.llm.custom_model
-        : next === "local" ? data.llm.ollama_model
-        : next === "anthropic" ? data.llm.anthropic_model
-        : next === "openai" ? data.llm.openai_model
-        : next === "claude_cli" ? data.llm.claude_cli_model
-        : next === "codex_cli" ? data.llm.codex_cli_model
-        : "",
-      );
-      setCliEffort(
-        next === "codex_cli" ? data.llm.codex_cli_effort
-        : data.llm.claude_cli_effort,
-      );
+      setModel(modelFor(next, data.llm));
+      setCliEffort(effortFor(next, data.llm));
     },
     [data],
   );
@@ -276,6 +303,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         body.custom_base_url = customUrl.trim();
       }
       if (provider === "anthropic") body.anthropic_model = model;
+      if (provider === "lmstudio") body.model = model.trim();
       if (provider === "local") {
         body.ollama_model = model;
         body.ollama_base_url = ollamaUrl.trim();
@@ -361,6 +389,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   ref={firstField}
                   value={gameDir}
                   spellCheck={false}
+                      autoComplete="off"
                   onChange={(e) => {
                     setGameDir(e.target.value);
                     setVerdict(null);
@@ -415,6 +444,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     <input
                       value={model}
                       spellCheck={false}
+                      autoComplete="off"
                       onChange={(e) => setModel(e.target.value)}
                       placeholder="model name"
                       aria-label="Model name"
@@ -425,6 +455,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       <input
                         value={customUrl}
                         spellCheck={false}
+                      autoComplete="off"
                         onChange={(e) => setCustomUrl(e.target.value)}
                         placeholder="https://api.groq.com/openai/v1"
                         aria-label="Custom endpoint base URL"
@@ -433,10 +464,25 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   )}
                   <div className="set-row">
                     <input
-                      type="password"
+                      // NOT type="password". Chrome attaches its password
+                      // manager to those fields whatever the autocomplete
+                      // hint says, and "new-password" actively invites the
+                      // generate-a-password offer -- reported twice. An API
+                      // key is a secret but it is not a login, and the
+                      // browser has no business filing it with one.
+                      //
+                      // Masked with -webkit-text-security instead, falling
+                      // back to a real password field where that is not
+                      // supported (Firefox), which is also where Chrome's
+                      // password UI does not exist.
+                      type={maskable ? "text" : "password"}
+                      className={maskable ? "set-secret" : undefined}
+                      name="wc-provider-secret"
+                      data-1p-ignore
+                      data-lpignore="true"
                       value={apiKey}
-                      autoComplete="off"
                       spellCheck={false}
+                      autoComplete="off"
                       onChange={(e) => setApiKey(e.target.value)}
                       placeholder={keyStored ? "•••••••• saved — type to replace" : "API key"}
                       aria-label="API key"
@@ -521,6 +567,69 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     probing={probing}
                     onCheck={() => runProbe("lmstudio")}
                   />
+                  <div className="set-row">
+                    <input
+                      value={model}
+                      spellCheck={false}
+                      autoComplete="off"
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder="model id, e.g. gemma-4-26b-a4b-it"
+                      aria-label="LM Studio model"
+                    />
+                  </div>
+                  {/* A <datalist> was here and behaved as a FILTER, not a
+                      picker: with a model already in the box nothing else
+                      prefix-matched, so the dropdown arrow appeared and
+                      opened on nothing until the field was cleared. The
+                      models are already probed -- showing them is simpler
+                      than making someone empty a box to discover them.
+
+                      Chat models only: the server also lists embedding
+                      models, which would fail silently as a counsel model. */}
+                  {probe?.provider === "lmstudio" &&
+                    (probe.models ?? []).filter((m) => !m.toLowerCase().includes("embed"))
+                      .length > 0 && (
+                      <div className="model-picks">
+                        {(probe.models ?? [])
+                          .filter((m) => !m.toLowerCase().includes("embed"))
+                          .map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              className="model-pick"
+                              data-on={m === model.trim() ? "1" : undefined}
+                              data-loaded={(probe.loaded ?? []).includes(m) ? "1" : undefined}
+                              title={
+                                (probe.loaded ?? []).includes(m)
+                                  ? `${m} — loaded in LM Studio right now`
+                                  : `${m} — installed; LM Studio loads it on the first request`
+                              }
+                              onClick={() => setModel(m)}
+                            >
+                              {m}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  {probe?.provider === "lmstudio" &&
+                    (probe.loaded ?? []).length > 0 &&
+                    !(probe.loaded ?? []).includes(model.trim()) && (
+                      <p className="set-note" data-ok="0">
+                        LM Studio currently has{" "}
+                        <strong>{(probe.loaded ?? []).join(", ")}</strong>{" "}
+                        loaded, but counsel is set to{" "}
+                        <strong>{model.trim() || "nothing"}</strong>. Requests
+                        name the model, so LM Studio will load that one back
+                        and unload what you picked.{" "}
+                        <button
+                          type="button"
+                          className="link-btn"
+                          onClick={() => setModel((probe.loaded ?? [])[0])}
+                        >
+                          Use the loaded one
+                        </button>
+                      </p>
+                    )}
                 <p className="set-note">
                   Uses LM Studio&apos;s local server at{" "}
                   <code>{data.llm.lmstudio_base_url}</code>. No key needed.
@@ -529,6 +638,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   <input
                     value={ctxLimit}
                     spellCheck={false}
+                      autoComplete="off"
                     inputMode="numeric"
                     onChange={(e) => setCtxLimit(e.target.value)}
                     placeholder={
@@ -567,6 +677,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     <input
                       value={model}
                       spellCheck={false}
+                      autoComplete="off"
                       onChange={(e) => setModel(e.target.value)}
                       placeholder="model, e.g. llama3.1"
                       aria-label="Ollama model"
@@ -576,6 +687,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     <input
                       value={ollamaUrl}
                       spellCheck={false}
+                      autoComplete="off"
                       onChange={(e) => setOllamaUrl(e.target.value)}
                       placeholder="http://localhost:11434"
                       aria-label="Ollama server address"
@@ -604,6 +716,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 web view, where there is room for it.
               </p>
               <OverlaySettings />
+            </section>
+
+            <section className="set-block">
+              <label>Screen reading (OCR)</label>
+              <p className="set-note">
+                Optional and Windows-only. The app reads two small boxes on your
+                screen — nothing is sent anywhere and the game is never touched.
+              </p>
+              <OcrSettings />
             </section>
 
             <section className="set-block">

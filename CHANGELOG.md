@@ -34,6 +34,220 @@ sessions — but there was no way to clear one, so a conversation from days
 ago greeted every launch and rode into every new answer as history.
 "clear thread" beside the ask box deletes it, for that character only.
 
+## v2.4.0 — 2026-08-02
+
+**Melee loadouts, measured from your own fights.** A new section in the gear
+tab groups every stored encounter by the weapon verbs that appeared and
+reports what each actually did — DPS, average hit, hits per minute — so
+"do I lose damage giving up dual wield for a two-hander" is answered with
+your data instead of a formula.
+
+It has to be measured, because it cannot honestly be modelled: eqlwiki does
+not publish the two-handed damage bonus, it links out to a classic
+EverQuest table, and classic values have been wrong for this game before.
+
+**Proc rate now counts in weapon comparisons.** Weapons with a combat effect
+carry their expected procs per minute, computed from your DEX. The
+important part is counterintuitive and the advisor is now told it outright:
+proc chance is a per-MINUTE budget, not a per-swing roll, so a faster
+weapon does not proc more often. What changes is how many hands carry a
+budget — the main hand gets the full rate and the off-hand half, so dual
+wielding yields about 1.5x a two-hander's procs. That was a real dual-wield
+advantage the white-DPS index could never see.
+
+**Dual-wield context.** The panel reports how often an off-hand can land at
+your level, from the skill cap — at 24 that is 50%, so a second weapon adds
+up to half again, never double. Owning Ambidexterity raises it, and both
+readings of the AA's "+32%" are shown because its text does not say whether
+that is points or relative.
+
+**What it will not tell you.** Hand count is not inferred. Two weapons of
+the same type both log the same verb and the log genuinely cannot separate
+them, so the panel reports the rate and leaves the reading to you. Two
+earlier attempts at guessing it were both wrong, and both were caught by a
+player saying what they had actually equipped.
+
+Figures are HITS per minute, not swings — a missed off-hand swing is not
+recorded, so an off-hand is worth at least what is shown.
+
+## v2.3.0 — 2026-08-02
+
+**The app can read your character sheet.** An optional second screen-reading
+box over the Inventory window picks up HP, mana, AC, your attributes and
+your resists — including the `196/510` caps. It only reads while the
+Inventory window is open with the Equipment tab focused, once every 15
+seconds, and it checks for the yellow label text before spending an OCR
+pass so a closed window is never mistaken for a screenful of zeroes.
+
+**Gear advice stops recommending stats you cannot raise.** At 510 an
+attribute is done, and further points on an item are worth nothing. The
+advisor now values each candidate at what it would ACTUALLY deliver —
+full value when there is room, the remainder when there is little, zero
+when the rest of your gear already caps it. A like-for-like swap between
+two items carrying the same capped stat correctly ties. Without a stats
+reading nothing changes.
+
+**Race unlock turn-ins are flagged as you loot them.** A Gnoll Fang reads
+as vendor trash and is 1/1200th of a Barbarian. Looting one now names the
+race, the NPC and the zone, and Vitals keeps a running tally against the
+target — `37 / 1200` tells you whether to keep going. Seven lootable
+turn-ins from the community race-unlock guide.
+
+**Spell sets are named after your trio.** They were all called "companion"
+and "prebuffs", so every trio overwrote the last one and keeping two meant
+regenerating and logging out each time you swapped. Now
+`pal/dru/mnk` and `pal/dru/mnk-buffs`, which simply coexist.
+
+**Screen-reading setup moved into Settings**, under Overlay, with a Place
+box and Test read for each region. Test read reports the measured yellow
+level next to the threshold, because a closed window and a badly placed box
+otherwise look identical. The Atlas keeps a status line.
+
+**Groundwork: reading your group window.** The in-game group box is the only
+place that states who is actually with you — the log never does — and it
+lists players without their pets. The region, capture and calibration are
+in; the reader itself is deliberately unwritten until it can be built
+against a real capture rather than a guess.
+
+**Fixed**
+
+- Item hover cards were clipped by their panel and painted behind
+  everything below them. They now float free and are fully opaque.
+- The LM Studio model box showed `o3`, an OpenAI-only model. The stored
+  settings were right all along; the panel was reading the wrong field.
+- After "Check server", the model list behaved as a filter — the dropdown
+  opened on nothing until you emptied the box. The probed models are now
+  shown as buttons, with a dot marking what is loaded.
+- The API key field no longer summons the browser's password manager.
+- Opening the UI on `127.0.0.1` instead of `localhost` left every REST
+  feature silently dead while the page looked alive. Both now work.
+
+## v2.2.1 — 2026-08-01
+
+**Mend now shows a timer.** Monk Mend has a 90-second re-use and nothing
+was tracking it. The ability was already parsed; it simply never started a
+countdown.
+
+Improved Mend ("You magically mend your wounds...") is recognised as the
+same ability — it had been firing and matching nothing at all.
+
+Note that Mend, unlike Lay on Hands, never prints a "you can use the
+ability again in..." line, so this timer has nothing to correct itself
+against. The 90 seconds was measured across 547 uses in a real log and
+confirmed in game.
+
+## v2.2.0 — 2026-08-01
+
+**You can now tell the app who is in your group.** It could only ever
+guess, from signals that are all momentary — a join line, an invite, a
+word in group chat. A group that formed by invite and plays quietly emits
+none of them, so real groupmates sat under "not counted" while their
+damage went uncredited. The Encounter panel now lists them with the one
+number that decides it — how many of your fights they turned up in — and
+Add / Ignore buttons, plus Add all / Ignore all. Ignore holds only until a
+join, invite or group line proves otherwise. Names drop off on their own
+five minutes after they stop fighting, and likely pets are marked and
+listed last rather than burying the names you can actually act on.
+
+**Fixed: a backend reload emptied your party.** The roster was never
+saved, which was harmless while unknown contributors were credited by
+default and became a disappearing act once they were not.
+
+**Fixed: the advisor could have your race wrong forever.** Race was
+recorded once and never updated, so a value left over from beta outranked
+every /who since. It reached real output — the advisor states race, and
+class advice is race-influenced.
+
+**Gear advice got several things right that it had been getting wrong:**
+
+- An off-hand weapon is no longer suggested to classes that cannot Dual
+  Wield. It would never swing, so its damage was never going to happen.
+- Items whose wiki page lists no stats can now fill an EMPTY slot. An
+  earring in an empty ear beats nothing, whatever the page says.
+- Resist lines written as "SV Cold" instead of "SV COLD" are no longer
+  dropped. Affected items compared as though they had no resist at all.
+- **Trade-offs are shown instead of hidden.** A candidate that wins some
+  stats and loses others used to be discarded silently while the row read
+  "no better owned option flagged". It now says what you would gain and
+  what you would give up, and leaves the call to you.
+- **You can correct an item's stats yourself** — the "stats?" button beside
+  any worn item. Some wiki pages are stubs and some carry stats from the
+  original EverQuest for items EQL rebalanced; nothing in the app can catch
+  that, but you are holding the item.
+
+**Charmed pets count properly.** A charm fights before it identifies
+itself, and everything it did before `/pet leader` used to be thrown away.
+
+**Group fights no longer split into fragments** when you go OOM, step away
+to heal, or die — confirmed groupmates hold the fight open for up to 20
+seconds past your own last action.
+
+**Your class can be inferred from your spells.** 80% of spells belong to
+exactly one class, so casting one is proof. Shown as a /who hint rather
+than written in: a cast proves a class is slotted, not what the other two
+slots hold.
+
+**Beta play no longer shows up as this character's history.** Lifetime
+totals already excluded it; the encounter list, session history and trio
+comparison did not.
+
+## v2.1.13 — 2026-08-01
+
+**Strangers no longer appear on your damage meter.** Someone fighting
+nearby could show up as if they were helping, because their mob shared a
+name with yours and nothing could tell the two apart.
+
+EverQuest Legends does not allow shared damage — once a mob is tagged, only
+the tagger and their group can hurt it. So anyone who is not in your group
+is, by definition, fighting something else. The meter now credits your
+group and your pets, and nobody else. Previously, with no group, it
+credited everyone present.
+
+Anything excluded still shows as one "filtered" line rather than vanishing.
+That matters if you logged in already grouped and the app has not seen your
+group yet — a real groupmate would sit in that line until someone speaks in
+group chat, and you can see it happening rather than wondering where their
+damage went.
+
+## v2.1.12 — 2026-07-31
+
+**Your pet's damage was partly going to a stranger.** A pet fights before
+it tells the app who it belongs to, so its opening swings were credited to
+an unknown name and never counted toward your session at all — and once it
+was recognised you saw it twice on the meter, as itself and as "someone".
+Its earlier damage is now claimed the moment it is recognised, and your own
+pet is labelled "(pet)" the way other people's pets already were.
+
+**The overlay meter shows the fight you are in.** It used to hide a
+last-five-fights mode behind a click on the right of the header. That is a
+slower question, and the Encounter panel in the app answers it with room to
+spare — so the overlay does one thing, and the whole header now switches
+Damage/DPS.
+
+**The overlay's shortcut list was cut off.** With Scroll Lock on, the hint
+ran past the edge of the window and everything after "opacity" was
+invisible — including how to lock it back to click-through and how to close
+it. It wraps onto two lines now.
+
+**LM Studio: you can choose the model, and the choice sticks.** Loading a
+different model, then watching the app load the old one back, was the app
+never reading the model you picked — and there was no way to pick one in
+the first place. Settings now lists what your server has, and warns when
+the loaded model is not the one counsel will use.
+
+**Gear advice fixes.**
+- Items in an "Any Slot" are judged on stats alone. A weapon there is never
+  swung, so its damage was being counted for a slot that cannot use it.
+- The "Held" row is gone. Nothing goes in it, so a row permanently reading
+  "nothing owned equips here" was noise. It returns if an item ever fits.
+- Pet suggestions respect what a pet can wear: no two chests, and no extra
+  weapon when it is already holding a two-hander.
+- An AA has to exist. Recommendations naming abilities that are not in the
+  game are dropped rather than shown.
+
+**Per-mob coin is gone from Session hunting.** Coin is useful as a session
+total, which is still there; split across a mob list it was noise.
+
 ## v2.1.11 — 2026-07-30
 
 **Spell timers now account for the upgrade tier.** Upgrading a spell makes

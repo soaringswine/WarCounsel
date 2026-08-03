@@ -290,6 +290,85 @@ function ReviewBlock({ dc, label }: { dc: DoubleCheck; label: string }) {
  *  and picks for the current zone. The backend grounds the counsel in EQL
  *  wiki data (via MCP) and generates it with the configured LLM, caching it
  *  until the character context changes. */
+
+/** Correct an item's stats from what the player can actually read in game.
+ *
+ * eqlwiki item pages are community-written: some are stubs with no stat
+ * block, some carry classic-era numbers for an item EQL rebalanced. Every
+ * gate we have -- owned, fits the slot, class-usable -- passes a wrong
+ * number happily, so the person holding the item is the only check left.
+ * Slot and Class are NOT asked for: the wiki gets those right and they are
+ * what gate the item, so a typo there would do real damage. */
+function StatFix({ name, onSaved }: { name: string; onSaved: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="adv-statfix-open"
+        title={`Correct the stats recorded for ${name}`}
+        onClick={() => setOpen(true)}
+      >
+        stats?
+      </button>
+    );
+  }
+  const save = () => {
+    const v = draft.trim();
+    if (!v || busy) return;
+    setBusy(true);
+    apiSend("/api/item-stats", { name, stats: v, rank: 0 })
+      .then(() => {
+        setOpen(false);
+        setDraft("");
+        onSaved();
+      })
+      .finally(() => setBusy(false));
+  };
+  return (
+    <span className="adv-statfix">
+      <input
+        autoFocus
+        value={draft}
+        placeholder="AC: 6; STR: +5"
+        aria-label={`Stats for ${name}`}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") setOpen(false);
+        }}
+      />
+      <button type="button" onClick={save} disabled={busy}>
+        {busy ? "…" : "Save"}
+      </button>
+      <button type="button" onClick={() => setOpen(false)}>
+        Cancel
+      </button>
+    </span>
+  );
+}
+
+interface MeleeGroup {
+  verbs: string[];
+  fights: number;
+  dps: number;
+  avg_hit: number;
+  hits_per_min: number;
+  level_lo: number | null;
+  level_hi: number | null;
+}
+interface MeleeCompare {
+  groups: MeleeGroup[];
+  dual_wield_ceiling?: number | null;
+  ambidexterity?: boolean;
+  ceiling_with_aa?: { as_points: number; as_relative: number } | null;
+  level?: number | null;
+  overlap: { level_lo: number; level_hi: number; groups: MeleeGroup[] } | null;
+  note?: string;
+}
+
 export const AdvisorPanel = memo(function AdvisorPanel({
   snap,
   onSnapChange,
@@ -502,6 +581,7 @@ export const AdvisorPanel = memo(function AdvisorPanel({
 
   const [rescanning, setRescanning] = useState(false);
   const [gear, setGear] = useState<GearAdvice | null>(null);
+  const [melee, setMelee] = useState<MeleeCompare | null>(null);
   const [gearLoading, setGearLoading] = useState(false);
   // Slots with nothing in them, so an unverifiable owned item can be shown
   // next to the gap it MIGHT fill. The app cannot match them up itself --
@@ -552,6 +632,14 @@ export const AdvisorPanel = memo(function AdvisorPanel({
     advice.nice_to_have.forEach((s) => { sel[s.name] = sel[s.name] ?? false; });
     setPickSel(sel);
   }, [advice]);
+
+  const loadMelee = async () => {
+    try {
+      setMelee(await apiGet<MeleeCompare>("/api/melee-compare"));
+    } catch {
+      setMelee(null);
+    }
+  };
 
   const consultGear = async (refresh: boolean) => {
     setGearLoading(true);
@@ -1262,7 +1350,13 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                     type="button"
                     className="adv-rescan adv-gear-btn"
                     onClick={() => writeSpellSet("loadout")}
-                    title={'Write these picks as an in-game spell set ("companion") — then /memspellset companion loads the whole bar'}
+                    title={
+                      // Deliberately NOT recomputing the name here. The
+                      // backend derives it from the trio and reports it
+                      // back; a second copy of that rule in the UI is the
+                      // provider/model bug waiting to happen again.
+                      "Write these picks as an in-game spell set named after your trio (e.g. pal/dru/mnk) — then /memspellset <that name> loads the whole bar"
+                    }
                   >
                     write in-game spell set
                   </button>
@@ -1341,7 +1435,9 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                     type="button"
                     className="adv-rescan adv-gear-btn"
                     onClick={() => writeSpellSet("prebuffs")}
-                    title={'Write the pre-buffs as an in-game spell set ("prebuffs", permanent buffs first) — /memspellset prebuffs, buff up, then /memspellset companion for combat'}
+                    title={
+                      "Write the pre-buffs as a set named after your trio with a -buffs suffix (e.g. pal/dru/mnk-buffs), permanent buffs first — memorise it, buff up, then load your combat set"
+                    }
                   >
                     write pre-buff set
                   </button>
@@ -1642,7 +1738,16 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                         }
                       >
                         <td className="adv-cls">{s.slot}</td>
-                        <td>{s.current ? <ItemHover name={s.current} /> : "—"}</td>
+                        <td>
+                          {s.current ? (
+                            <>
+                              <ItemHover name={s.current} />
+                              <StatFix name={s.current} onSaved={() => consultGear(true)} />
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
                         <td>
                           <strong>{s.recommend ? <ItemHover name={s.recommend} /> : "—"}</strong>
                           {s.where && (
@@ -1655,6 +1760,82 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                   </tbody>
                 </table>
               )}
+              <div className="adv-sub" style={{ marginTop: 12 }}>
+                Melee loadouts — measured
+                <button type="button" className="link-btn" onClick={loadMelee}>
+                  {melee ? "refresh" : "compare"}
+                </button>
+              </div>
+              {melee && (
+                <>
+                  <p className="adv-note">
+                    From your own fights, not a formula: the two-handed damage bonus
+                    is not published for this game. WEAPON SWINGS ONLY — kick, bash,
+                    smite and the monk strike/punch line are class skills on their
+                    own timers and are excluded, so this is the weapon&apos;s
+                    contribution and not your whole melee output. Hands are inferred
+                    NOT inferred: two weapons of the same type both log one verb,
+                    and an off-hand adds far less than double because it only
+                    swings when a skill check passes.
+                    {melee.overlap
+                      ? ` Levels ${melee.overlap.level_lo}–${melee.overlap.level_hi} only, so gear and level are not doing the work.`
+                      : " Level ranges differ between rows — compare with that in mind."}
+                    {melee.dual_wield_ceiling
+                      ? ` At level ${melee.level} an off-hand lands at most ${Math.round(
+                          melee.dual_wield_ceiling * 100,
+                        )}% of the time, so a second weapon adds up to that — not double.`
+                      : ""}
+                    {melee.ceiling_with_aa
+                      ? ` Ambidexterity raises that to ${Math.round(
+                          melee.ceiling_with_aa.as_relative * 100,
+                        )}–${Math.round(melee.ceiling_with_aa.as_points * 100)}% — the AA text does not say whether its +32% is points or relative.`
+                      : ""}
+                    {" These are HITS, not swings: a missed off-hand swing is not counted, so an off-hand is worth at least what this shows."}
+                  </p>
+                  <table className="enc-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Weapons seen</th>
+                        <th scope="col">Fights</th>
+                        <th scope="col">DPS</th>
+                        <th scope="col">Avg</th>
+                        <th
+                          scope="col"
+                          title={
+                            melee.dual_wield_ceiling
+                              ? `At level ${melee.level}, a maxed dual-wield skill lands the off-hand at most ${Math.round(melee.dual_wield_ceiling * 100)}% of the time — so a second weapon adds up to that much, not double.`
+                              : undefined
+                          }
+                        >
+                          Hits/min
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(melee.overlap?.groups ?? melee.groups)
+                        .filter((g) => g.fights >= 3)
+                        .slice(0, 6)
+                        .map((g) => (
+                          <tr key={g.verbs.join("+")}>
+                            {/* No hand-count label. Two attempts at inferring
+                                it from the log were both wrong, and two
+                                slashing weapons are genuinely indistinguishable
+                                from one here — the swing rate is the evidence,
+                                and you know what you equipped. */}
+                            <td className="enc-name">{g.verbs.join(" + ")}</td>
+                            <td>{g.fights}</td>
+                            <td>
+                              <strong>{g.dps}</strong>
+                            </td>
+                            <td>{g.avg_hit}</td>
+                            <td>{g.hits_per_min}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+
               {gear && (gear.merges?.length ?? 0) > 0 && (
                 <>
                   <div

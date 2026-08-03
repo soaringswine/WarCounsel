@@ -445,7 +445,13 @@ _ILS_SCALABLE = ("HP REGEN", "SV DISEASE", "SV POISON", "SV MAGIC",
 _ILS_STAT_RE = re.compile(
     r"(\b(?:" + "|".join(re.escape(s) for s in
                          sorted(_ILS_SCALABLE, key=len, reverse=True))
-    + r")\b)(:\s*)([+\-]?)(\d+(?:\.\d+)?)(\s*%?)")
+    + r")\b)(:\s*)([+\-]?)(\d+(?:\.\d+)?)(\s*%?)", re.I)
+# CASE-INSENSITIVE deliberately. eqlwiki writes resist lines both
+# ways -- "SV Cold: +5" on one page, "SV COLD: +3" on another -- and
+# matching only the upper form dropped the mixed-case ones SILENTLY.
+# A pair of boots then compared as though it had no cold resist at
+# all, which is invisible: the stat is not zero, it is absent, so
+# nothing looks wrong. Consumers upper-case the captured name.
 
 
 def item_rank(name: str) -> int:
@@ -556,6 +562,37 @@ def weapon_indices(dmg: float, delay: float,
             "oh": round(roll / delay_s * p_oh, 1), "db": db}
 
 
+def proc_rates(dex) -> Optional[dict]:
+    """Expected weapon procs per minute, per hand.
+
+    Per eqlwiki's Weapon Procs page: proc chance is normalised to a PROCS
+    PER MINUTE budget, not rolled per swing -- the game divides the target
+    rate by how fast you are swinging, so a faster weapon does NOT proc
+    more often. Swing rate is therefore irrelevant here, which is the
+    opposite of what the white-DPS index would lead you to assume.
+
+    What DOES change with the loadout is how many hands are carrying a
+    budget: the main hand gets the full rate and the off-hand HALF, so
+    dual wield is ~1.5x a two-hander's procs. That is the dual-wield
+    benefit the index cannot see, because the index excludes procs.
+
+        main hand = (DEX / 170) + 0.5      off-hand = half that
+
+    None without a DEX reading -- the stats OCR supplies it, and inventing
+    a number here would put a confident figure on a page next to measured
+    ones.
+    """
+    try:
+        d = float(dex)
+    except (TypeError, ValueError):
+        return None
+    if d <= 0:
+        return None
+    mh = d / 170.0 + 0.5
+    return {"mh": round(mh, 2), "oh": round(mh / 2, 2),
+            "dual": round(mh * 1.5, 2), "two_hand": round(mh, 2)}
+
+
 def item_stat_vector(line: str) -> dict:
     """Canonical stat -> value parsed from a (scaled) compact line, for
     deterministic comparisons. Includes DELAY (lower is better) and the
@@ -570,7 +607,7 @@ def item_stat_vector(line: str) -> dict:
     m = re.search(r"Atk Delay:\s*(\d+(?:\.\d+)?)", line or "")
     if m:
         out["DELAY"] = float(m.group(1))
-    m = re.search(r"SV VOID:\s*[+]?(\d+)", line or "")
+    m = re.search(r"SV VOID:\s*[+]?(\d+)", line or "", re.I)
     if m:
         out["SV_VOID"] = float(m.group(1))
     return out
@@ -633,6 +670,18 @@ async def item_line(name: str) -> Optional[str]:
     """Compact stat line for an item (wiki, cached 24h). None = no page or
     not equipment."""
     base = _strip_upgrade(name)
+    # A player CORRECTION outranks the page. _supplied_line below is the
+    # gap-filler and stays a last resort; this is the other case -- the
+    # wiki has a page and it is wrong for this game. Checked before the
+    # cache so a correction takes effect immediately rather than after the
+    # 24h item_line2 entry expires.
+    try:
+        from backend import item_facts
+        ov = item_facts.override_for(0, base)
+    except Exception:
+        ov = None
+    if ov:
+        return ov[0]
     key = base.lower()
     cached = wiki_page_cache.get("item_line2", key)
     if cached is not None:
@@ -908,6 +957,7 @@ def _trio_usable(line: str, classes: list) -> Optional[bool]:
 
 
 async def build_gear_context(items: list, classes: Optional[list] = None,
+                             dex=None,
                              max_items: int = 100,
                              level=None) -> dict:
     """Stat lines for every unique owned item that has an equipment page,
@@ -955,6 +1005,15 @@ async def build_gear_context(items: list, classes: Optional[list] = None,
                 if wi:
                     note += (f" [white-DPS index: MH {wi['mh']} / "
                              f"OH {wi['oh']}]")
+            # A weapon with a combat effect carries a proc budget, and that
+            # budget does NOT scale with swing speed -- so it is invisible
+            # to the index above and has to be stated separately.
+            if (dex and re.search(r"^Effect:|; Effect:", line)
+                    and not re.search(r"Effect:[^;]*\(Focus", line)):
+                pr = proc_rates(dex)
+                if pr:
+                    note += (" [procs/min: " + str(pr["mh"]) + " main hand, "
+                             + str(pr["oh"]) + " off-hand]")
             lines.append(f"{entry['name']} [{where}]{tag}{note} — {line}")
         else:
             # The prompt line below still lists EVERY wiki-less item, so the

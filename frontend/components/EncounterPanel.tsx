@@ -1,9 +1,19 @@
 "use client";
 
 import { memo, useEffect, useState } from "react";
-import type { AbilitySummary, DeathRecap, Encounter, EncounterAbility } from "@/lib/types";
+import type {
+  AbilitySummary,
+  DeathRecap,
+  Encounter,
+  EncounterAbility,
+  FilteredContributor,
+} from "@/lib/types";
+import { trustAll, trustMember } from "@/lib/api";
 
 const fmt = (n: number) => n.toLocaleString("en-US");
+
+/** An EQL group holds four — not the six of the game it reimagines. */
+const GROUP_CAP = 4;
 
 function fightLabel(idx: number, enc: Encounter): string {
   if (idx === 0) return enc.active ? "Active" : "Last fight";
@@ -72,11 +82,21 @@ export const EncounterPanel = memo(function EncounterPanel({
   encounters,
   summary,
   lastDeath,
+  filtered,
 }: {
   encounters: Encounter[];
   summary: AbilitySummary | null;
   lastDeath: DeathRecap | null;
+  filtered?: FilteredContributor[];
 }) {
+  // Names the player has ruled on this render, so a row leaves immediately
+  // instead of lingering until the next snapshot lands.
+  const [ruled, setRuled] = useState<Record<string, boolean>>({});
+  // Adding everyone can push the roster past what a group holds, and a
+  // wrong name credits damage that is not yours -- so that one asks twice.
+  // Ignoring everyone is reversible by any join, invite or group line, so
+  // it does not.
+  const [confirmAdd, setConfirmAdd] = useState(false);
   // Anchor the viewed pull by its start time so history shifting underneath
   // (a new fight starting) doesn't yank the panel to a different fight.
   const [viewStarted, setViewStarted] = useState<string | null>(null);
@@ -251,6 +271,125 @@ export const EncounterPanel = memo(function EncounterPanel({
                     <AbilityTable abilities={summary.heals} />
                   </>
                 )}
+              </div>
+            )}
+
+            {(filtered ?? []).some((f) => !ruled[f.name]) && (
+              <div className="enc-agg enc-filtered">
+                <h3>Not counted</h3>
+                <p className="enc-filtered-why">
+                  Damage from people we can&apos;t confirm are in your group. EQL only lets
+                  the tagger&apos;s group hurt a mob, so anyone in most of your fights is
+                  grouped — a passer-by on a same-named mob shows up once or twice.
+                  Names drop off on their own once they stop hitting your targets.
+                  Rows marked <span className="enc-tag">pet?</span> have never shown up in a
+                  /who and have never spoken, so they are most likely someone&apos;s pet —
+                  they are listed last and are usually safe to ignore.
+                </p>
+                <table className="enc-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">In your fights</th>
+                      <th scope="col">Damage</th>
+                      <th scope="col">
+                        <span className="sr-only">Add to group or ignore</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(filtered ?? [])
+                      .filter((f) => !ruled[f.name])
+                      .map((f) => (
+                        <tr key={f.name} data-dim={f.pet ? "1" : undefined}>
+                          <td className="enc-name">
+                            <span className="enc-rule" aria-hidden />
+                            {f.name}
+                            {f.pet && (
+                              <span
+                                className="enc-tag"
+                                title="Never appeared in a /who and has never spoken — most likely someone's pet. One word in chat clears this."
+                              >
+                                pet?
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            {f.fights} <span className="enc-share">({f.share}%)</span>
+                          </td>
+                          <td>{fmt(f.damage)}</td>
+                          <td className="enc-trust-cell">
+                            {(["add", "ignore"] as const).map((act) => (
+                              <button
+                                key={act}
+                                type="button"
+                                className="enc-trust"
+                                data-act={act}
+                                title={
+                                  act === "add"
+                                    ? `Count ${f.name}'s damage — they are in your group`
+                                    : `Hide ${f.name} until a join, invite or group chat proves otherwise`
+                                }
+                                onClick={() => {
+                                  setRuled((r) => ({ ...r, [f.name]: true }));
+                                  trustMember(f.name, act).catch(() =>
+                                    setRuled((r) => {
+                                      const n = { ...r };
+                                      delete n[f.name];
+                                      return n;
+                                    }),
+                                  );
+                                }}
+                              >
+                                {act === "add" ? "Add" : "Ignore"}
+                              </button>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+                <div className="enc-bulk">
+                  <button
+                    type="button"
+                    className="enc-trust"
+                    data-act={confirmAdd ? "warn" : "add"}
+                    onClick={() => {
+                      const names = (filtered ?? []).filter((f) => !ruled[f.name]);
+                      if (!confirmAdd && names.length > GROUP_CAP) {
+                        setConfirmAdd(true);
+                        return;
+                      }
+                      setConfirmAdd(false);
+                      setRuled((r) => {
+                        const n = { ...r };
+                        names.forEach((f) => (n[f.name] = true));
+                        return n;
+                      });
+                      trustAll("add").catch(() => setRuled({}));
+                    }}
+                  >
+                    {confirmAdd
+                      ? `Add all anyway — that is more than a group of ${GROUP_CAP}`
+                      : "Add all"}
+                  </button>
+                  <button
+                    type="button"
+                    className="enc-trust"
+                    data-act="ignore"
+                    onClick={() => {
+                      setConfirmAdd(false);
+                      setRuled((r) => {
+                        const n = { ...r };
+                        (filtered ?? []).forEach((f) => (n[f.name] = true));
+                        return n;
+                      });
+                      trustAll("ignore").catch(() => setRuled({}));
+                    }}
+                  >
+                    Ignore all
+                  </button>
+                </div>
               </div>
             )}
 
