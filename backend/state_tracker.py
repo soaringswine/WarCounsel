@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 DPS_WINDOW_SECONDS = 60
 COMBAT_TIMEOUT_SECONDS = 8
 
+# Spell gems before any AA spends. Mnemonic Retention adds to this, and its
+# own roster description states how many -- "allowing you to memorize 6
+# additional spell" -- so the gem count is DERIVABLE and does not have to be
+# a number the player remembers to bump.
+#
+# It used to be user-set only, and went stale the moment a rank was bought:
+# observed at 13 (rank 5) while the character had rank 6, so every consult
+# came back one pick short. Matched on the DESCRIPTION rather than the
+# ability name, because the sentence is what actually states the effect and
+# any future AA granting gems would say the same thing.
+BASE_SPELL_GEMS = 8
+RE_EXTRA_GEMS = re.compile(r"memoriz\w*\s+(\d+)\s+additional\s+spell", re.I)
+
+
+def gems_from_aa_desc(desc: str) -> Optional[int]:
+    """Extra spell gems an AA's roster description grants, or None."""
+    m = RE_EXTRA_GEMS.search(desc or "")
+    return int(m.group(1)) if m else None
+
 # How far past YOUR last action a groupmate's swings may hold the fight
 # open. A group fight does not pause because you ran out of mana, went to
 # heal, or died -- but an unbounded extension would let a busy zone hold
@@ -122,7 +141,9 @@ class CharacterTracker:
         self.race: Optional[str] = None
         self.playstyle: Optional[str] = None
         self.aa_available: Optional[int] = None  # unspent AA points (user-set; +1 per gain)
-        self.spell_slots: Optional[int] = None   # spell slots unlocked via AAs (user-set)
+        # spell gems: DERIVED from the Mnemonic Retention roster description
+        # on every `/alternateadv list`, user-settable until one is seen
+        self.spell_slots: Optional[int] = None
         self.pet_slots: Optional[int] = None     # pet equipment slots (user-set)
         self.pet_classes: Optional[str] = None   # pet's equip class(es), user-set
         self.max_hp: Optional[int] = None        # user-reported (log has no max HP)
@@ -713,6 +734,19 @@ class CharacterTracker:
                         entry["cost"] = e.cost
                     if e.desc and not entry["desc"]:
                         entry["desc"] = e.desc[:150]
+                        # Parse the FULL desc, not the stored 150-char slice.
+                        # The game's own text outranks the user's setting for
+                        # the same reason the log's running AA total does:
+                        # a hand-typed number cannot survive a rank purchase.
+                        extra = gems_from_aa_desc(e.desc)
+                        if extra is not None:
+                            gems = BASE_SPELL_GEMS + extra
+                            if self.spell_slots != gems:
+                                logger.info(
+                                    "Spell gems %s -> %s (base %d + %d from "
+                                    "%s)", self.spell_slots, gems,
+                                    BASE_SPELL_GEMS, extra, self._last_aa_name)
+                            self.spell_slots = gems
 
         if live:
             self.last_event_at = e.ts
