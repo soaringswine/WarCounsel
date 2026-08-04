@@ -1047,11 +1047,13 @@ class CharacterTracker:
                     # seconds old.)
                     self._pending_xp = (e.ts, e.percent)
             elif isinstance(e, ev.AAPoint):
-                self.aa_points += 1
+                # points arrive in batches ("gained 2 ability point(s)"), so
+                # both counters move by the amount granted, not by 1
+                self.aa_points += e.count
                 if e.total is not None:
                     self.aa_available = e.total  # the log's own running total
                 elif self.aa_available is not None:
-                    self.aa_available += 1
+                    self.aa_available += e.count
             elif isinstance(e, ev.SkillUp):
                 self.skill_ups += 1
             elif isinstance(e, ev.Loot):

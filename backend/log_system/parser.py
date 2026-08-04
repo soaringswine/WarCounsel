@@ -94,8 +94,17 @@ RE_MY_DEATH = re.compile(r"^You have been slain by (.+?)!")
 RE_OTHER_DEATH = re.compile(r"^(.+?) has been slain by (.+?)!")
 RE_EXP = re.compile(r"^You gain (party )?experience!*(?:\s*\((\d+(?:\.\d+)?)%\))?")
 RE_LEVEL = re.compile(r"^You have gained a level! Welcome to level (\d+)!")
-RE_AA = re.compile(r"^You have gained an ability point!"
-                   r"(?:\s+You now have (\d+) ability points?\.)?")
+# EQL prints TWO shapes and only the second carries the running total:
+#     You have gained an ability point!
+#     You have gained 2 ability point(s)!  You now have 6 ability point(s).
+# The old pattern matched "an" only and spelled the plural "points?", so the
+# literal "(s)" never matched -- which meant 17 of 23 AA lines in a real log
+# were unparsed, INCLUDING every line carrying the authoritative total. The
+# counter then drifted: it only ever +1'd off the singular form and never
+# resynced to the game's own number. Group 1 is the amount gained (absent =>
+# 1), group 2 the total.
+RE_AA = re.compile(r"^You have gained (?:an|(\d+)) ability point(?:s|\(s\))?!"
+                   r"(?:\s+You now have (\d+) ability point(?:s|\(s\))?\.)?")
 RE_SKILL = re.compile(r"^You have become better at (.+?)! \((\d+)\)")
 # kept-in-inventory loot; the corpse name gives exact per-mob attribution
 RE_LOOT = re.compile(r"^--You have looted (?:(\d+) |an? |the )?(.+?)(?: from (.+))?\.--")
@@ -475,7 +484,8 @@ def parse_line(line: str, character_name: Optional[str] = None) -> Optional[ev.L
     if lv := RE_LEVEL.match(body):
         return ev.LevelUp(level=int(lv.group(1)), **base)
     if a := RE_AA.match(body):
-        return ev.AAPoint(total=int(a.group(1)) if a.group(1) else None, **base)
+        return ev.AAPoint(count=int(a.group(1)) if a.group(1) else 1,
+                          total=int(a.group(2)) if a.group(2) else None, **base)
     if sk := RE_SKILL.match(body):
         return ev.SkillUp(skill=sk.group(1), value=int(sk.group(2)), **base)
     if lo := RE_LOOT.match(body):

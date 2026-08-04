@@ -1404,7 +1404,14 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                     write in-game spell set
                   </button>
                   <span className="adv-pick-count">
-                    {Object.values(pickSel).filter(Boolean).length}/14 picked · gems auto-ordered: DD, DoT, AoE, heals@8, utility, pets
+                    {/* Was hardcoded "/14". The gem count is Mnemonic
+                        Retention's rank + the base 8, so it MOVES -- and the
+                        counter two lines up already reads spell_slots. Two
+                        numbers on one heading disagreeing is how a stale
+                        setting hides: the hardcode happened to match the real
+                        gem count while spell_slots still said 13, so the
+                        loadout came back one short with nothing to show why. */}
+                    {Object.values(pickSel).filter(Boolean).length}/{snap?.spell_slots ?? 8} picked · gems auto-ordered: DD, DoT, AoE, heals@8, utility, pets
                     {(advice.sa_songs?.length ?? 0) > 0 ? " · SA songs last" : ""}
                   </span>
                 </h3>
