@@ -250,6 +250,14 @@ class AAPoint(LogEvent):
     total: Optional[int] = None
 
 
+class AASpend(LogEvent):
+    """Points SPENT on an ability. `cost` is 0 for toggle AAs (Symphonic
+    Aura: Enabled), which re-enable free and are not purchases."""
+    type: str = "aa_spend"
+    name: str
+    cost: int
+
+
 class SkillUp(LogEvent):
     type: str = "skill"
     skill: str

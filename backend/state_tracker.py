@@ -1088,6 +1088,14 @@ class CharacterTracker:
                     self.aa_available = e.total  # the log's own running total
                 elif self.aa_available is not None:
                     self.aa_available += e.count
+            elif isinstance(e, ev.AASpend):
+                # The counter only ever went UP before this: gains parsed,
+                # purchases did not, so a player who spent every point still
+                # saw the old total. Floored at 0 -- the log carries no
+                # running total on a spend, so a missed gain must not push
+                # this negative.
+                if e.cost and self.aa_available is not None:
+                    self.aa_available = max(0, self.aa_available - e.cost)
             elif isinstance(e, ev.SkillUp):
                 self.skill_ups += 1
             elif isinstance(e, ev.Loot):

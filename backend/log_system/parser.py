@@ -105,6 +105,16 @@ RE_LEVEL = re.compile(r"^You have gained a level! Welcome to level (\d+)!")
 # 1), group 2 the total.
 RE_AA = re.compile(r"^You have gained (?:an|(\d+)) ability point(?:s|\(s\))?!"
                    r"(?:\s+You now have (\d+) ability point(?:s|\(s\))?\.)?")
+# SPENDING them. Nothing parsed these at all, so the unspent counter only
+# ever went UP -- a real log had 125 spend lines against 23 gains, and the
+# player who had just spent six points still saw six. Two shapes:
+#     You have gained the ability "Foraging" at a cost of 3 ability points.
+#     You have improved Mnemonic Retention 6 at a cost of 3 ability points.
+# Cost can be 0: toggle AAs (Symphonic Aura: Enabled) re-enable for free, and
+# those must NOT be treated as a purchase. The count is plural even at 1.
+RE_AA_SPEND = re.compile(
+    r"^You have (?:gained the ability|improved) [\"']?(.+?)[\"']?"
+    r" at a cost of (\d+) ability points?\.")
 RE_SKILL = re.compile(r"^You have become better at (.+?)! \((\d+)\)")
 # kept-in-inventory loot; the corpse name gives exact per-mob attribution
 RE_LOOT = re.compile(r"^--You have looted (?:(\d+) |an? |the )?(.+?)(?: from (.+))?\.--")
@@ -486,6 +496,8 @@ def parse_line(line: str, character_name: Optional[str] = None) -> Optional[ev.L
     if a := RE_AA.match(body):
         return ev.AAPoint(count=int(a.group(1)) if a.group(1) else 1,
                           total=int(a.group(2)) if a.group(2) else None, **base)
+    if sp := RE_AA_SPEND.match(body):
+        return ev.AASpend(name=sp.group(1).strip(), cost=int(sp.group(2)), **base)
     if sk := RE_SKILL.match(body):
         return ev.SkillUp(skill=sk.group(1), value=int(sk.group(2)), **base)
     if lo := RE_LOOT.match(body):
