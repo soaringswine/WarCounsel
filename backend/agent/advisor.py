@@ -290,6 +290,37 @@ def _reply_text(response: Any) -> str:
     return chr(10).join(p for p in out if p)
 
 
+def _warn_if_truncated(prompt: str, data: dict) -> None:
+    """Say so when the prompt cannot have fitted in the model's context.
+
+    Ollama truncates silently -- no error, no flag on the response -- so a
+    prompt that overflows produces a confident answer built from whatever
+    survived. A level-46 character got a fourteen-slot loadout containing
+    two spells, and nothing anywhere said the spellbook had been cut off.
+
+    Estimated at ~3 chars per token, deliberately rough: this exists to
+    catch "the prompt is twice the window", not to be exact.
+    """
+    try:
+        from backend.llm_runtime import context_limit
+        limit = int((context_limit() or {}).get("limit") or 0)
+    except Exception:
+        return
+    if not limit:
+        return
+    est = len(prompt) // 3
+    if est <= limit:
+        return
+    picks = len(data.get("must_have") or []) + len(data.get("should_have") or [])
+    logger.warning(
+        "prompt ~%d tokens exceeds the %d-token context — the model saw only "
+        "part of it (returned %d loadout picks)", est, limit, picks)
+    data["note"] = ((data.get("note") or "") + " ").lstrip() + (
+        f"NOTE: this prompt is about {est} tokens and the model's context is "
+        f"{limit}, so part of it — most likely your spellbook — was cut off "
+        f"before the model saw it. Raise the context limit in Settings.")
+
+
 def _no_json_reason(response: Any, raw: str) -> str:
     """Why there was no JSON, in terms the player can act on.
 
@@ -1496,6 +1527,9 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
                 # stays INSIDE the else: on the revision path there is no
                 # `response` to read, and `data` is already the reply.
                 raise ValueError(_no_json_reason(response, raw))
+            # upstream v2.5.1 — the retry above can REPLACE `prompt`, so this
+            # must read the one actually sent, not the first attempt's.
+            _warn_if_truncated(prompt, data)
         solo = (ctx.get("playstyle") or "").startswith("solo")
         usable = ([s["name"] for s in book["castable"]
                    if s["level"] <= ctx["level"]]
@@ -3029,6 +3063,9 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
             data = _extract_json(raw)
             if not data:
                 raise ValueError(_no_json_reason(response, raw))
+            # upstream v2.5.1 — inside the else: the revision path never
+            # sent a prompt, so there is nothing there to call truncated.
+            _warn_if_truncated(prompt, data)
     except Exception as e:
         logger.warning("Gear advisor failed: %.140s", str(e))
         try:
