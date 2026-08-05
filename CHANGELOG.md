@@ -6,6 +6,17 @@ in the app header; update by closing the companion and running
 
 ## Unreleased
 
+**Instrument stones are no longer offered a home in your armor.** The
+equipment advisor would suggest freeing a weapon or shield by parking its
+exaltation in a worn armor piece — the socket is genuinely there and
+genuinely empty, so nothing caught it, but the game refuses the combine
+outright ("doing so will create an unusable item"). Socketing produces an
+item carrying both restrictions at once, and a Secondary-slot Bard drum
+plus a Chest piece leaves nowhere to equip the result. Move lists now
+enforce the held-vs-worn split on every candidate, so that trade stops
+being suggested. Weapon-to-weapon moves are untouched: a Secondary drum in
+a Primary-only spear is still legal and still offered.
+
 **One chat now answers for the gear advisor too.** It could see which
 equipment rows proposed a change and nothing else — not the slots it left
 alone, and not one stat behind any of it, so "why did it keep my helm?"

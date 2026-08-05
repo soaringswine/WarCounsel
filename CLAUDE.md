@@ -854,8 +854,22 @@ whenever the Inventory parse changes.
     speed test, host scimitar moved Primary -> Secondary -> unequipped):
     the instrument modifier is ACTIVE from Primary and Secondary hosts
     and OFF when unequipped; Any Slot was already established by play.
-    Only ARMOR-slot hosts remain unverified — prompts allow a one-time
-    in-game check suggestion for those alone, never "gives nothing".
+  - **What DID survive is the coarser HELD-vs-WORN split, and it is now
+    enforced on EVERY candidate — socket data cannot stand in for it.**
+    The 2026-07-29 correction over-shot: wherever the export confirmed an
+    empty socket the slot check was skipped entirely, leaving only class
+    overlap. So a consult recommended moving a Bard's Hand Drum into worn
+    Bronze Vambraces (Arms) to free a shield for an Any Slot — Arms does
+    have an empty focus socket, every gate passed — and the game refused:
+    *"doing so will create an unusable item"* (PLAYER-VERIFIED
+    2026-08-04). Socketing yields an item carrying the COMMON restriction
+    of both, and held ∩ armor is empty. `_category_compatible` in
+    advisor.py runs before the proc/focus branches; `tests/
+    test_exalt_categories.py` pins BOTH corrections, so neither can be
+    undone silently. Two rules that look alike and are not: exact-slot
+    intersection is WRONG (a Secondary drum is fine in a Primary-only
+    spear), held-vs-worn is RIGHT. Unknown or `ANY SLOT` on either side
+    never blocks — absence of data is not evidence of incompatibility.
   - **Bard instruments are exaltations with NO wiki Effect line** — the
     item IS the effect (a song modifier). They used to fall through to
     "no listed effect (stat stone?)", the prompt valued them at zero, and

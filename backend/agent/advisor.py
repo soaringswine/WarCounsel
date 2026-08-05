@@ -1708,7 +1708,7 @@ __CONTEXT__
 OWNED EQUIPMENT (from /outputfile inventory; [worn/bags/bank] shows where each lives; stats and drop sources are from the game's wiki):
 __GEAR__
 
-EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. A stone carries its source item's CLASS restriction (host classes shrink to the overlap). The wiki also claims equip-SLOT restrictions transfer, but live play disproved that for focus stones: an instrument stone's modifier was PLAYER-VERIFIED (Selo's test) active with its host worn in Primary, Secondary, or an Any Slot, and off only when the host is unequipped — NEVER claim a socketed stone "gives nothing" based on the host's hand slot. Armor-slot hosts remain untested; only there may you suggest a one-time in-game check. A statless item hosting a stone is often a deliberate carrier, not filler. Each socketed stone's line below states where it can LEGALLY move (machine-checked: empty socket of its type — sockets unlock by merge rank, an unmerged item has none — plus class overlap plus slot compatibility): when it says NO legal empty socket exists, the stone cannot follow any winner — count it fully toward its host's value, and if you still recommend unseating that host, say plainly the effect is lost until a socket opens. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
+EXALTATIONS (socketable effect-stones extracted from items — for CONTEXT only; the app reports them separately, do NOT recommend moving them). Stones move between owned items at NO cost (within class/slot legality), so when comparing two OWNED items for a slot, IGNORE any socketed stone that could legally move to the challenger — the stone follows the winner. Count a stone toward its host's value only when it could NOT legally move. A stone carries its source item's CLASS restriction (host classes shrink to the overlap). The wiki also claims equip-SLOT restrictions transfer, but live play disproved that for focus stones: an instrument stone's modifier was PLAYER-VERIFIED (Selo's test) active with its host worn in Primary, Secondary, or an Any Slot, and off only when the host is unequipped — NEVER claim a socketed stone "gives nothing" based on the host's hand slot. What DOES bind is the held-vs-worn category: socketing yields an item carrying both restrictions, so a HELD-sourced stone (Primary/Secondary/Range, every Bard instrument among them) in an ARMOR host is refused by the game outright ("will create an unusable item") — PLAYER-VERIFIED 2026-08-04. Never propose freeing a weapon or shield by parking its instrument stone in armor; that move is illegal, not merely untested. The per-stone move lists below already enforce this. A statless item hosting a stone is often a deliberate carrier, not filler. Each socketed stone's line below states where it can LEGALLY move (machine-checked: empty socket of its type — sockets unlock by merge rank, an unmerged item has none — plus class overlap plus slot compatibility): when it says NO legal empty socket exists, the stone cannot follow any winner — count it fully toward its host's value, and if you still recommend unseating that host, say plainly the effect is lost until a socket opens. PROC stones may only fire from the PRIMARY slot (confirmed for several stones): never count a proc as value on an item you recommend for Secondary or Range, and when a swap strands a proc stone off-primary, say so in the why (e.g. "move its stone into your primary first"). A stone adds value ONLY while usable by the trio AND its level requirement is met; DORMANT/unusable stones are zero. Item Effect lines follow the same rule — "at Level N" effects below the character's level are worth nothing yet.
 __EXALTS__
 
 __PET_BLOCK__
@@ -2298,6 +2298,35 @@ def _class_overlap(a, b) -> bool:
     return bool(a & b) if (a and b) else False
 
 
+# Socketing produces an item carrying the COMMON restriction of both, so a
+# combination whose restrictions cannot coexist is refused OUTRIGHT by the
+# game ("...will create an unusable item"). The axis is HELD vs WORN, not
+# the exact slot: a SECONDARY-sourced Hand Drum is accepted by a
+# PRIMARY-only spear, by a scimitar worn in Primary and by shields, so
+# exact-slot intersection is disproved — but PLAYER-VERIFIED 2026-08-04,
+# the same stone is REFUSED by armor, which is the case the code used to
+# offer. Ammo is deliberately NOT "held": it is consumable, not a hand.
+_HELD_SLOTS = {"PRIMARY", "SECONDARY", "RANGE"}
+
+
+def _slot_category(slots: set) -> Optional[str]:
+    """"held" (hand/range gear) vs "worn" (armor + jewelry).
+
+    None means UNDECIDABLE — no Slot line, or an "ANY SLOT" item, which
+    EQL lets you equip anywhere. None never blocks a candidate: absence of
+    data is not evidence of incompatibility (the house rule).
+    """
+    if not slots or "ANY" in slots:
+        return None
+    return "held" if (slots & _HELD_SLOTS) else "worn"
+
+
+def _category_compatible(src_slots: set, tgt_slots: set) -> bool:
+    """False only when both sides are KNOWN and disagree."""
+    a, b = _slot_category(src_slots), _slot_category(tgt_slots)
+    return a is None or b is None or a == b
+
+
 async def _exalt_targets(stone_name: str, styp: str,
                          candidates: List[str],
                          sockets_map: Optional[dict] = None) -> List[str]:
@@ -2306,7 +2335,10 @@ async def _exalt_targets(stone_name: str, styp: str,
     worn -> shared class + same slot. Source item = the stone's own name.
     When the Inventory export carries socket rows, a target must ALSO
     have an EMPTY socket of the stone's type number (game-authoritative,
-    stricter than the wiki heuristics)."""
+    stricter than the wiki heuristics).
+
+    Every candidate additionally passes `_category_compatible` — held
+    stones need held hosts — which socket data can NEVER stand in for."""
     src = await _item_meta(re.sub(r"\s*[(]Exaltation[)]$", "", stone_name).strip())
     if not src:
         return []
@@ -2336,6 +2368,16 @@ async def _exalt_targets(stone_name: str, styp: str,
             continue
         if not _class_overlap(src["classes"], tgt["classes"]):
             continue
+        # Category gate — runs even when the export CONFIRMS an empty
+        # socket, because socket data answers "is there a hole of the
+        # right type" and this answers "would the result be equippable
+        # anywhere". They are different questions and the game enforces
+        # both: an empty focus socket on Bronze Vambraces is real, and
+        # dropping a Hand Drum into it is still refused. Reported from
+        # live play 2026-08-04, where the advice was to move a Bard's
+        # drum into worn Arms to free a shield.
+        if not _category_compatible(src["slots"], tgt["slots"]):
+            continue
         if styp == "proc":
             # export socket data overrides the weapon-only heuristic here:
             # real exports show proc sockets on earrings/faces
@@ -2355,10 +2397,8 @@ async def _exalt_targets(stone_name: str, styp: str,
             # later by a scimitar WORN IN PRIMARY, both accepted by the
             # game (2026-07-29 exports; the wiki page's own example is a
             # proc stone, and the claim likely generalizes only there).
-            # Whether an effect works IDENTICALLY from every host slot is
-            # unverified — the move list is informational, and the
-            # instrument prompt text says to confirm a new host type
-            # in-game once.
+            # The coarser HELD-vs-WORN split that DID survive live play is
+            # enforced above for every candidate, socket data or not.
             if not (src["slots"] & tgt["slots"]):
                 continue
         out.append(cand)
@@ -2681,9 +2721,12 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
                            "Primary, Secondary, or an Any Slot, and OFF "
                            "when the host is unequipped — NEVER claim the "
                            "stone 'gives nothing' because of its host's "
-                           "hand slot. Only ARMOR-slot hosts (Head/Chest/"
-                           "etc.) remain untested — suggest a one-time "
-                           "in-game check only for those. A statless item "
+                           "hand slot. ARMOR hosts are ILLEGAL, "
+                           "PLAYER-VERIFIED 2026-08-04: the game refuses "
+                           "the combine outright ('will create an unusable "
+                           "item'), so never propose moving an instrument "
+                           "stone into Head/Chest/Arms/etc. to free a hand "
+                           "— that trade does not exist. A statless item "
                            "kept as a stone carrier is a DELIBERATE "
                            "setup, not filler"
                            if kind else "no listed effect (stat stone?)")
