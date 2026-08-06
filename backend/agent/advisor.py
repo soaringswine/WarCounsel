@@ -300,10 +300,23 @@ def _warn_if_truncated(prompt: str, data: dict) -> None:
 
     Estimated at ~3 chars per token, deliberately rough: this exists to
     catch "the prompt is twice the window", not to be exact.
+
+    Only asked where the number MEANS something. `context_limit()` returns
+    the conservative 8192 default for cloud and CLI providers on purpose --
+    it is a spending budget, not their window -- so comparing a prompt to
+    it accused a 200k-window model of truncating: a claude_cli consult that
+    saw the whole 13,589-token prompt still told the player their spellbook
+    had been cut off and to raise a limit that would not have changed what
+    the model saw. A probed local window and a pinned manual value do
+    describe the model, so those still warn.
     """
     try:
-        from backend.llm_runtime import context_limit
-        limit = int((context_limit() or {}).get("limit") or 0)
+        from backend.llm_runtime import active, context_limit
+        info = context_limit() or {}
+        limit = int(info.get("limit") or 0)
+        if info.get("source") != "manual" and \
+                active()["provider"] not in ("lmstudio", "local"):
+            return
     except Exception:
         return
     if not limit:

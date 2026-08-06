@@ -865,9 +865,15 @@ def guide_budget() -> int:
     3200 was chosen to protect a model loaded at 8k. That is the floor,
     not the norm: a local server reports its LOADED window and 32k is
     common, where holding guides to 3200 discards most of what we could
-    say. Cloud providers stay at the floor deliberately -- their context
+    say. METERED cloud APIs stay at the floor deliberately -- their context
     is ample but their tokens are billed, and nobody asked us to spend
     four times as much per consult.
+
+    A CLI provider is neither. `claude_cli`/`codex_cli` shell out to a
+    subscription CLI: the window is hundreds of thousands of tokens and no
+    consult is billed per token, so the floor was rationing against a cost
+    that does not exist -- an Opus-class model was reading class guides
+    truncated for an 8k llama. They get the ceiling.
 
     Scales with the window rather than jumping, and stops at 9000: past
     that the guides would crowd out the gear and spell context they are
@@ -875,11 +881,18 @@ def guide_budget() -> int:
     prompt measured ~3.9s locally).
     """
     try:
-        from backend.llm_runtime import context_limit
+        from backend.llm_runtime import active, context_limit
         info = context_limit()
     except Exception:
         return 3200
     if info["source"] == "default":
+        # Not "manual": a player who pins a number is describing a window,
+        # and that pin outranks the provider's own generosity below.
+        try:
+            if active()["provider"] in ("claude_cli", "codex_cli"):
+                return 9000
+        except Exception:
+            pass
         return 3200
     return max(3200, min(9000, int(info["limit"] * 0.18)))
 

@@ -1148,7 +1148,18 @@ per-guide cap from it (floor 3200, ceiling 9000 — beyond that guides crowd
 out the gear/spell context they exist to inform, and a 10k-token prompt
 measured ~3.9s locally).
 
-- **Cloud providers are never scaled up.** Ample context, billed tokens.
+- **Metered cloud APIs are never scaled up.** Ample context, billed tokens.
+- **CLI providers ARE**, to the 9000 ceiling. `claude_cli`/`codex_cli` shell
+  out to a subscription CLI — a 200k window and nothing billed per token —
+  so the floor was rationing against a cost that does not exist, and an
+  Opus-class model read class guides truncated for an 8k llama. A manual
+  pin still outranks this: pinning a number is describing a window.
+- **`_warn_if_truncated` only fires where the limit describes the MODEL** —
+  local/LM Studio, or any provider with a manual pin. `context_limit()`
+  returns 8192 for cloud and CLI on purpose, so comparing a prompt to it
+  accused a 200k-window model of truncating: a `claude_cli` consult that saw
+  the whole 13,589-token prompt told the player their spellbook had been cut
+  off and to raise a limit that would not have changed what the model saw.
 - **The manual override lives in `app_config.json`, not `llm_config.json`.**
   Reading the wrong file made a pinned value silently do nothing. The
   settings panel writes every non-secret override to app_config.
