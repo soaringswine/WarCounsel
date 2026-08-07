@@ -176,6 +176,7 @@ def load_export(name: Optional[str], server: Optional[str],
         value["other_loadouts"] = other
         value["count"] = len(castable)
     elif kind == "Inventory":
+        from backend.eqlbis import canonical_inventory_name
         # Ear/Wrist/Fingers are PAIRED: the export emits two identical
         # location labels — number them or the second overwrites the first.
         # "<Loc>-SlotN" sub-rows are either bag contents (under General/Bank
@@ -204,11 +205,18 @@ def load_export(name: Optional[str], server: Optional[str],
             except ValueError:
                 item_id = 0
             empty = not item or item.lower() == "empty"
+            if not empty:
+                item = canonical_inventory_name(item)
             m = sub_re.match(loc)
             if m:
                 parent = m.group(1)
                 slot_n = int(m.group(2))
-                in_bank = parent.lower().startswith("bank")
+                parent_low = parent.lower()
+                parent_where = (
+                    "bank" if parent_low.startswith(("bank", "sharedbank"))
+                    else "hoard" if parent_low.startswith("hoard ")
+                    else "depot" if parent_low.startswith("personal-depot")
+                    else "bags")
                 # socket NUMBER encodes socket TYPE: a stone only fits a host
                 # socket of the same number. Record every socket (empty too).
                 if current is not None and current["loc"] == parent:
@@ -222,13 +230,13 @@ def load_export(name: Optional[str], server: Optional[str],
                         "host_loc": parent,
                         "host": last_item_at.get(parent),
                         "where": ("worn" if parent in WORN_SLOTS
-                                  else "bank" if in_bank else "bags"),
+                                  else parent_where),
                     })
                     continue
-                if parent in WORN_SLOTS:
+                if parent in WORN_SLOTS or parent_where == "hoard":
                     continue  # non-exalt socket rows on gear: nothing to track
                 items.append({"loc": loc,
-                              "where": "bank" if in_bank else "bags",
+                              "where": parent_where,
                               "name": item, "id": item_id})
                 continue
             if empty:
@@ -240,8 +248,14 @@ def load_export(name: Optional[str], server: Optional[str],
                 key = (f"{loc} {seen_slots[loc]}" if loc in paired else loc)
                 worn[key] = item
                 where = "worn"
-            elif loc.lower().startswith("bank"):
+            elif loc == "Equipment":
+                where = "stash"
+            elif loc.lower().startswith(("bank", "sharedbank")):
                 where = "bank"
+            elif loc.lower().startswith("hoard "):
+                where = "hoard"
+            elif loc.lower().startswith("personal-depot"):
+                where = "depot"
             else:
                 where = "bags"
             entry = {"loc": loc, "where": where, "name": item,

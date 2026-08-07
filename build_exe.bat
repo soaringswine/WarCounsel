@@ -38,6 +38,7 @@ pyinstaller --noconfirm --onefile --windowed --name WarCounsel ^
   --add-data "data/eqlbuilds;data/eqlbuilds" ^
   --add-data "class_guides;class_guides" ^
   --add-data "backend/spell_lines.json;backend" ^
+  --add-data "backend/eql-bis-items.json;backend" ^
   --add-data "backend/zem_levels.wiki;backend" ^
   --add-data "maps;maps" ^
   --version-file build/version_info.txt ^

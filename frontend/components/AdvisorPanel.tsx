@@ -1842,7 +1842,22 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                             <span className="adv-cls"> ({s.where})</span>
                           )}
                         </td>
-                        <td className="adv-why">{s.why}</td>
+                        <td className="adv-why">
+                          {s.why}
+                          {s.weighted && s.weighted.why.length > 0 && (
+                            <details className="adv-weighted">
+                              <summary>
+                                {s.weighted.profile} score {s.weighted.delta >= 0 ? "+" : ""}{s.weighted.delta}
+                              </summary>
+                              <span>
+                                {s.weighted.why.slice(0, 5).map((p) =>
+                                  `${p.key} ${p.delta >= 0 ? "+" : ""}${p.delta}`
+                                ).join(" · ")}
+                                {s.weighted.cap_adjusted ? " · live stat caps applied" : ""}
+                              </span>
+                            </details>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

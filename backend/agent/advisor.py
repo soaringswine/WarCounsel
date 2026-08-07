@@ -959,6 +959,7 @@ async def _builtin_gear(ctx: dict) -> dict:
     from backend import item_facts
     from backend.game_data import (item_line, item_stat_vector,
                                    scale_item_line, _trio_usable)
+    from backend.eqlbis import compare_vectors, confident_upgrade
     worn = ctx.get("worn") or {}
     items = ctx.get("inventory_items") or []
     classes = [x.strip() for x in (ctx.get("class_str") or "").split("/")
@@ -991,11 +992,23 @@ async def _builtin_gear(ctx: dict) -> dict:
                     and (best is None or r > _item_rank(best["name"]))):
                 best = it
         if best:
-            recs.append({"slot": slot, "current": cur,
-                         "recommend": best["name"],
-                         "why": f"same item at higher rank "
-                                f"(+{_item_rank(best['name'])} vs +{cr})",
-                         "where": best["where"]})
+            rec = {"slot": slot, "current": cur,
+                   "recommend": best["name"],
+                   "why": f"same item at higher rank "
+                          f"(+{_item_rank(best['name'])} vs +{cr})",
+                   "where": best["where"]}
+            try:
+                base_line = await item_line(cur)
+                high_line = await item_line(best["name"])
+                if base_line and high_line:
+                    a = item_stat_vector(scale_item_line(
+                        high_line, _item_rank(best["name"])))
+                    b = item_stat_vector(scale_item_line(base_line, cr))
+                    a, b = _effective_vecs(a, b, ctx)
+                    rec["weighted"] = compare_vectors(a, b, classes)
+            except Exception:
+                pass
+            recs.append(rec)
             used.add(best["name"].lower())
             continue
         # cross-item swap. Weapons used to be skipped wholesale here
@@ -1079,6 +1092,7 @@ async def _builtin_gear(ctx: dict) -> dict:
         champ = None
         # best "wins some, loses some" candidate for this slot
         trade = None
+        weighted = None
         # Wiki-less items we nonetheless know the SLOT of, because the
         # player has worn them before (item_facts learns Location from the
         # export). Good enough to FILL an empty slot -- that needs no
@@ -1180,6 +1194,11 @@ async def _builtin_gear(ctx: dict) -> dict:
                             score = (len(up) - len(down), sum(up.values()))
                             if trade is None or score > trade[0]:
                                 trade = (score, it, up, down)
+                            judged = compare_vectors(a_vec, b_vec, classes)
+                            if (confident_upgrade(judged) and
+                                    (weighted is None or
+                                     judged["delta"] > weighted[0])):
+                                weighted = (judged["delta"], it, judged)
                     continue
                 gain = sum(a_vec.get(k, 0.0) - b_vec.get(k, 0.0)
                            for k in set(a_vec) | set(b_vec) if k != "DELAY")
@@ -1194,22 +1213,39 @@ async def _builtin_gear(ctx: dict) -> dict:
                                 "an off-hand weapon would never swing; only "
                                 "a shield or stat item helps here"})
             continue
+        if champ is None and weighted is not None:
+            _, wi, judged = weighted
+            movers = ", ".join(
+                f"{p['key']} {p['delta']:+g}" for p in judged["why"][:3])
+            recs.append({"slot": slot, "current": cur,
+                         "recommend": wi["name"], "where": wi["where"],
+                         "weighted": judged,
+                         "why": "balanced trio-weight score resolves the "
+                                f"trade-off at {judged['delta']:+g} "
+                                f"points" + (f" ({movers})" if movers else "")})
+            used.add(wi["name"].lower())
+            continue
         if champ is None and trade is not None:
             _sc, ti, up, down = trade
             fmt = lambda d: ", ".join(
                 f"{'+' if v > 0 else ''}{v:g} {k.replace('_', ' ')}"
                 for k, v in sorted(d.items(), key=lambda kv: -abs(kv[1])))
+            trade_line = await item_line(ti["name"])
+            trade_vec = item_stat_vector(scale_item_line(
+                trade_line or "", _item_rank(ti["name"])))
+            trade_vec, trade_cur = _effective_vecs(trade_vec, cur_vec, ctx)
+            judged = compare_vectors(trade_vec, trade_cur, classes)
             recs.append({"slot": slot, "current": cur,
                          "recommend": None, "where": ti["where"],
+                         "weighted": judged,
                          "tradeoff": {"item": ti["name"],
                                       "gains": fmt(up),
                                       "losses": fmt(down),
                                       "where": ti["where"]},
                          "why": f"trade-off — {ti['name']} gives "
-                                f"{fmt(up)} but costs {fmt(down)}. Not "
-                                f"recommended automatically because judging "
-                                f"those against each other needs weights we "
-                                f"do not have; your call"})
+                                f"{fmt(up)} but costs {fmt(down)}; the "
+                                f"balanced trio score is {judged['delta']:+g}, "
+                                "so it is not recommended"})
             continue
         if champ is None and fallback is not None:
             fb, fb_why = fallback
@@ -1241,9 +1277,20 @@ async def _builtin_gear(ctx: dict) -> dict:
                 why = ("strictly better at its owned +N — every "
                        "listed stat equal or higher (wiki "
                        "item-level scaling applied to both)")
-            recs.append({"slot": slot, "current": cur,
-                         "recommend": it["name"], "why": why,
-                         "where": it["where"]})
+            rec = {"slot": slot, "current": cur,
+                   "recommend": it["name"], "why": why,
+                   "where": it["where"]}
+            if cur and not hand:
+                try:
+                    cand_line = await item_line(it["name"])
+                    if cand_line:
+                        a = item_stat_vector(scale_item_line(
+                            cand_line, _item_rank(it["name"])))
+                        a, b = _effective_vecs(a, cur_vec, ctx)
+                        rec["weighted"] = compare_vectors(a, b, classes)
+                except Exception:
+                    pass
+            recs.append(rec)
             used.add(it["name"].lower())
     exalts = [{"name": x["name"], "move_to": "",
                "where": ("in " + x["host"] if x.get("host")
@@ -1264,7 +1311,8 @@ async def _builtin_gear(ctx: dict) -> dict:
     return {
         "source": "builtin",
         "note": "Deterministic gear check — no LLM. Same-item higher-rank "
-                "upgrades plus strictly-better swaps, with stats compared "
+                "upgrades, strictly-better swaps, and balanced trio-weighted "
+                "trade-offs, with stats compared "
                 "at each item's owned +N via the wiki's item-level "
                 "formula. 1H weapons compare by white-DPS index; procs, "
                 "2H and farming targets need a model from the "
@@ -2290,11 +2338,14 @@ def _full_slot_table(slots: List[dict], worn: Optional[dict]) -> List[dict]:
 
 
 def _warn_displacements(table: List[dict], stranded: dict) -> None:
-    """Deterministic post-gate: a slot rec that unseats an exaltation host
-    gets the hosted stone spelled out in its why — with a hard warning when
-    the stone has nowhere legal to go. Added after live play showed a swap
-    that silently stranded a Bard's drum and lute: the model had been told
-    the stones had "no listed effect" and no destination data at all."""
+    """Gate a slot rec that would unseat an exaltation host.
+
+    A warning is not enough when no legal empty destination was proven: the
+    proposed stat upgrade would actually lose the hosted effect. Keep the
+    current item in that case and retain the score/details only as evidence of
+    the blocked candidate. A recommendation survives only when every hosted
+    stone is known to have somewhere legal to move.
+    """
     for s in table:
         cur = str(s.get("current") or "")
         rec = str(s.get("recommend") or "")
@@ -2302,21 +2353,32 @@ def _warn_displacements(table: List[dict], stranded: dict) -> None:
             continue
         if _item_base(rec).lower() == _item_base(cur).lower():
             continue  # keep rows and same-item rank upgrades displace nothing
-        for st in stranded.get(_item_base(cur).lower(), []):
+        hosted = stranded.get(_item_base(cur).lower(), [])
+        blocked = [st for st in hosted if st.get("movable") is not True]
+        if blocked:
+            candidate = rec
+            stones = ", ".join(st["stone"] for st in blocked)
+            if any(st.get("movable") is False for st in blocked):
+                reason = "no owned item has a proven legal empty socket"
+            else:
+                reason = "no legal empty destination was verified"
+            prior = str(s.get("why") or "").rstrip()
+            s["recommend"] = cur
+            s["where"] = "worn"
+            s["why"] = (
+                f"keep — {candidate} wins the item-stat comparison"
+                + (f" ({prior})" if prior else "")
+                + f", but the swap is blocked: {cur} hosts {stones} and "
+                  f"{reason}. Do not unequip the host."
+            )
+            continue
+        for st in hosted:
             if st.get("movable") is True:
                 note = (f" | Hosts {st['stone']} — move the stone to one of "
                         "its legal empty sockets (Exaltations panel) BEFORE "
                         "unequipping this item.")
-            elif st.get("movable") is False:
-                note = (f" | WARNING (deterministic): {cur} hosts "
-                        f"{st['stone']} ({st['eff']}) and NO owned item has "
-                        "a legal empty socket for it — this swap LOSES that "
-                        "effect until a socket opens (merging an item "
-                        "unlocks its sockets).")
-            else:  # builtin path: hosts known, destinations not computed
-                note = (f" | Hosts {st['stone']} — find it a legal new "
-                        "socket (Exaltations panel) BEFORE unequipping "
-                        "this item.")
+            else:  # handled by the blocking branch above
+                continue
             s["why"] = (str(s.get("why") or "").rstrip() + note).strip()
 
 

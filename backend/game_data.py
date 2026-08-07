@@ -683,9 +683,11 @@ async def item_line(name: str) -> Optional[str]:
     if ov:
         return ov[0]
     key = base.lower()
+    from backend.eqlbis import catalog_item_line
+    catalog_line = catalog_item_line(base)
     cached = wiki_page_cache.get("item_line2", key)
     if cached is not None:
-        return cached or _supplied_line(base)
+        return cached or catalog_line or _supplied_line(base)
     page = await get_mcp_client().wiki_page(base, max_characters=4000)
     if page is None:
         # exact title missed — fuzzy-resolve (punctuation/case drift
@@ -705,10 +707,10 @@ async def item_line(name: str) -> Optional[str]:
         if stale:
             return stale
         wiki_page_cache.set("", 3600, "item_line2", key)
-        return _supplied_line(base)
+        return catalog_line or _supplied_line(base)
     line = _compact_item(page.get("text", ""))
     wiki_page_cache.set(line or "", WIKI_TTL, "item_line2", key)
-    return line or _supplied_line(base)
+    return line or catalog_line or _supplied_line(base)
 
 
 def _supplied_line(base: str) -> Optional[str]:
@@ -828,8 +830,13 @@ async def item_acquisition(name: str) -> dict:
     html = await fetch_page_html(base)
     if html is None:
         stale = wiki_page_cache.get_stale("item_acq1", key)
-        if stale is not None:
+        if stale is not None and stale.get("available"):
             return stale
+        from backend.eqlbis import catalog_acquisition
+        catalog = catalog_acquisition(base)
+        if catalog and catalog["available"]:
+            wiki_page_cache.set(catalog, WIKI_TTL, "item_acq1", key)
+            return catalog
         miss = {"item": base, "sections": [], "available": False}
         wiki_page_cache.set(miss, 3600, "item_acq1", key)
         return miss
@@ -842,6 +849,11 @@ async def item_acquisition(name: str) -> dict:
         # keep sections with real content; solitary boilerplate is noise
         if rows and not all(r["kind"] == "note" for r in rows):
             sections.append({"label": label, "lines": rows})
+    if not sections:
+        from backend.eqlbis import catalog_acquisition
+        catalog = catalog_acquisition(base)
+        if catalog and catalog["available"]:
+            sections = catalog["sections"]
     out = {"item": base, "sections": sections, "available": bool(sections)}
     wiki_page_cache.set(out, WIKI_TTL, "item_acq1", key)
     return out

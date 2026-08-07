@@ -366,6 +366,14 @@ export interface GearSlot {
   recommend: string | null;
   why: string;
   where?: string | null;
+  weighted?: {
+    profile: string;
+    current_score: number;
+    candidate_score: number;
+    delta: number;
+    why: { key: string; delta: number }[];
+    cap_adjusted?: boolean;
+  };
 }
 
 export interface GearFarm {

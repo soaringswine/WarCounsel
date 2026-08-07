@@ -2076,6 +2076,9 @@ button.app-version:hover { color: var(--gold-bright); }
 }
 .adv-pet-inline input[type="number"] { width: 42px; }
 .adv-gear-btn { margin-left: 0; }
+.adv-weighted { margin-top: 4px; color: var(--muted); font-size: 0.84em; }
+.adv-weighted summary { cursor: pointer; color: var(--gold-bright); }
+.adv-weighted > span { display: block; margin-top: 3px; }
 /* loading veil over the (possibly still-shown) gear tables */
 .adv-gear-section { position: relative; }
 .adv-gear-loading {
