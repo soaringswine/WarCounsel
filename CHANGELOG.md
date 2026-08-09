@@ -45,6 +45,114 @@ sessions — but there was no way to clear one, so a conversation from days
 ago greeted every launch and rode into every new answer as history.
 "clear thread" beside the ask box deletes it, for that character only.
 
+## v2.6.1 — 2026-08-09
+
+**The OCR download from v2.6.0 never made it out.** Its build failed a
+check on the way — the image-recognition models were left out of the
+bundle, so screen reading would have broken the moment anyone switched it
+on. `WarCounsel-OCR.zip` is attached to this release instead, and the build
+now proves the engine works by having it read a test image before shipping,
+rather than trusting that the pieces are present.
+
+`WarCounsel.exe` for v2.6.0 was built and released normally and is
+unaffected — the two are built separately on purpose. Everything else in
+v2.6.0, including the new Triggers panel, is unchanged and already in it.
+
+## v2.6.0 — 2026-08-08
+
+**Triggers you can actually set up.** Watching the log for the things you
+would otherwise miss now lives under **Settings ▸ Triggers**, instead of a
+JSON file you had to find and hand-edit. Add a row, pick what it watches,
+type the text — matches are plain text, so there is nothing to escape, and
+`*` catches every one of a kind.
+
+Five new things can be watched, all of which the app was already reading
+and simply had nowhere to report:
+
+- **your spell being interrupted**, and separately, **fizzling**
+- **someone else starting a cast** — a mob's cast line is the only warning
+  before it lands
+- **a raid mechanic firing**
+- **a mob being mesmerized**
+
+Charm and mez breaks were already possible and still are: watch `fade` for
+`Charm`. Each trigger says what its text is compared against, because a
+pattern aimed at the wrong part of the line fails silently forever.
+
+Also fixed: the trigger list showed nothing at all on a fresh install. The
+examples ship switched off, and the list was only reporting switched-on
+ones — so the one screen meant to explain the feature looked empty.
+
+**New download: `WarCounsel-OCR.zip`.** Reading your position off the screen
+was the one thing the single .exe could not do. It now can — as a separate
+download, because the image-recognition packages weigh about 200 MB against
+the app's 44 MB, and a one-file build unpacks everything on *every* launch.
+Folding them in would have slowed the start for everyone who never turns the
+feature on. The OCR build ships as a folder for the same reason: it unpacks
+once, not each time.
+
+`WarCounsel.exe` is unchanged — same download, same speed. Take the OCR one
+only if you want screen reading; both keep their data in the same place, so
+switching between them costs nothing.
+
+The settings panel used to answer "screen reading needs its optional
+packages: `pip install …`" for this, which could never work in the .exe and
+asked people with no Python to run a Python command. It now names the right
+download — or, in a source install, the exact interpreter to install into,
+since a plain `pip` frequently belongs to a different Python than the one
+running the app.
+
+## v2.5.3 — 2026-08-08
+
+**Fixed: the full install could fail with "'pip' is not recognized".** Windows
+ships a fake `python.exe` — a Microsoft Store shortcut that does nothing and
+*reports success* — and it is on your PATH by default. The installer believed
+it, skipped the offer to install Python, and then died on pip with no useful
+explanation. It now checks whether Python can say where it lives, which the
+fake one cannot.
+
+**It also stops asking you to install things you already have.** Python and
+Node.js are often installed but simply not on PATH (the python.org installer
+only adds it if you tick the box; Anaconda and Node both do this too). Both
+the installer and the launcher now look in the usual places before asking,
+and use what they find for that run — without changing your system PATH.
+
+**Fixed: the launcher could start the backend with the wrong Python.** It
+tried to activate its own environment, but that command quietly does nothing
+in a plain command window, so the backend started against an installation
+that had none of its dependencies and stopped with an import error. It now
+uses the environment's own Python directly.
+
+If you hit any of this, re-running `install_companion.bat` is enough — and
+INSTALL.md now lists the symptom, including how to switch the Store shortcuts
+off if you would rather clear them out.
+
+Nothing here affects the single .exe, which carries its own Python.
+
+## v2.5.2 — 2026-08-08
+
+**Fixed: 14 zones had no map or 3D geometry, including The Hole.** The Atlas
+looks a zone up by the name the log prints, and EQL prints the old long
+names — "The Ruins of Old Paineel" for The Hole, "The Liberated Citadel of
+Runnyeye", "Neriak - Commons" with a dash. None of those matched, so the
+panel said "no zone geometry for this place" for zones whose art was sitting
+in the game folder the whole time.
+
+Now charted and rendering: **The Hole**, The Warrens, Planes of Sky, Fear
+and Hate, the Temple of Solusek Ro, Runnyeye, the Lair of the Splitpaw, the
+Qeynos Aqueducts, the Castle of Mistmoore, and all three Neriak gates. Two
+of those (Mistmoore, Runnyeye) were broken by an entry that was *supposed*
+to help and instead hid a working one.
+
+Routing reaches the new zones too — The Hole and The Warrens connect through
+Paineel, the Temple through Lavastorm. Lake Nerius is still unmapped: it is
+the one EQL zone whose art ships in a format the 3D extractor does not read.
+
+Checked against the client's own zone list (`Resources/ZoneNames.txt`) —
+all 77 live zones now resolve. `scripts/zone_coverage.py` re-runs that check
+after a patch, so the next renamed zone shows up as a failure instead of an
+empty panel.
+
 ## v2.5.1 — 2026-08-04
 
 **Fixed: Ollama consults returned an almost empty loadout.** Ollama uses a

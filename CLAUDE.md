@@ -33,7 +33,7 @@ UI when any frontend source is newer than the last build (a stale
 mode — its `--reload` has occasionally wedged in production launches, and
 a lite deterministic mode powers a planned single .exe (see below).
 
-**Single executable** (`build_exe.bat` -> PyInstaller onefile, ~59MB,
+**Single executable** (`build_exe.bat` -> PyInstaller onefile, ~44MB,
 ~4s cold start; BUILT AND VERIFIED on Windows 11). Everything works
 except screen OCR: HUD, overlay, Atlas 3D with textures, and LLM counsel.
 FastAPI serves the static `frontend/out` at `/` (same-origin, `api.ts`
@@ -65,6 +65,46 @@ Hard-won, all of it load-bearing:
   clients are in it deliberately: the settings panel offers an API key
   field. `llm_runtime.available()` probes at runtime and the panel greys
   out what is missing.
+- **There is a SECOND packaged variant: `WarCounsel-OCR.zip`**
+  (`requirements-heavy.txt`, `build_exe.bat heavy`, the `build-ocr` CI job
+  — same app, screen OCR included). Three things about it are deliberate:
+  - **It is `--onedir`, not `--onefile.`** A one-file bundle re-extracts
+    its whole payload to a temp dir on EVERY launch — that IS the ~4s cold
+    start — so the cost scales with size. At 200MB that tax would land on
+    every start, which is also why OCR is not simply added to the lean
+    build: the people who never enable it would pay for it forever.
+  - **The size is opencv, not the OCR engine.** Measured 2026-08-08:
+    cv2 112.4MB, onnxruntime 42.5, numpy 30.8, rapidocr 15.6, mss 0.4 —
+    204.6MB total, against a 43.6MB exe. `mss` is 0.4MB and is never the
+    problem, whatever the error message suggests. **opencv-python-headless
+    does NOT help** (112.0MB — the same 82MB `cv2.pyd` on Windows; the
+    ~40MB figure quoted for it is the WHEEL). What IS droppable is
+    opencv's 29.4MB `opencv_videoio_ffmpeg*.dll`, a video codec that OCR
+    on still screenshots cannot reach; the build deletes it.
+  - **CI asserts `/api/ocr/status.deps_ok` on the built artifact.** The
+    import guard in `ocr_system` is broad on purpose (a half-present
+    rapidocr raises `FileNotFoundError`, not `ImportError`), so a broken
+    OCR bundle looks exactly like a working one until someone enables it.
+    `deps_ok` alone proved too weak — `run_companion.py --ocr-check`
+    (mirroring `--overlay-check`) runs the REAL engine over a rendered
+    "X: 1234" and fails unless the digits come back.
+  - **Build the OCR release on PYTHON 3.12.** The engine renamed itself and
+    the two packages are not interchangeable: 3.12 gets
+    `rapidocr-onnxruntime` v1, which SHIPS its ONNX models; 3.13 gets
+    `rapidocr` v2, which ships none and DOWNLOADS them on first use.
+    `--collect-all` cannot bundle what does not exist, so the 3.13 build
+    passed every import check and then hung inside the engine waiting on a
+    download — 114 minutes of CI before anyone looked. A packaged build
+    must work offline, the same reason `maps/` and `zem_levels.wiki` are
+    bundled. Every CI step that runs the engine carries `timeout-minutes`,
+    because this class of failure WAITS rather than erroring.
+  - **Verify on the Python CI actually builds with.** The v1/v2 split meant
+    a local check on 3.12 passed while the shipped 3.13 build was broken —
+    the local run never touched the same package.
+  - The two jobs are INDEPENDENT (no `needs:`): the optional download must
+    never hold back the exe most people use.
+  - `Windows.Media.Ocr` is not an alternative — it silently drops short
+    lines like "Z: 4", which is precisely the data this reads.
 - The packaged updater cannot pull or rebuild a source tree, and the exe
   cannot overwrite itself while running — it points at the releases page.
 
@@ -320,15 +360,45 @@ hours-to-level estimate (exact only after a same-session ding).
   section, and a Vitals list.
 - **Tracked rules** (backend/alerts.py, data/tracked_rules.json):
   SUBSTRING-only matches (never regex) on loot/kill/death/zone/tell/
-  fade ("*" = match all) plus "bighit" (pattern = damage threshold); 5s
-  per-rule cooldown; live events only; mtime-reloaded on edit.
+  fade/interrupt/fizzle/cast/mechanic/mez ("*" = match all) plus
+  "bighit" (pattern = damage threshold); 5s per-rule cooldown; live
+  events only; mtime-reloaded on edit.
+  - **A rule kind is only half the work — the event must FIRE it.** The
+    last five kinds were added in 2026-08 for a Discord question ("can you
+    trigger on a spell interrupt, like GINA?") whose answer was no for no
+    good reason: `ev.CastInterrupted` had been parsed all along, spell name
+    and all, with nothing wired to it. When adding a kind, grep
+    `_fire_alerts` in state_tracker.py — a kind that reaches no event is
+    invisible and looks exactly like a rule that never matches.
+  - `KIND_HELP` states what each pattern is compared AGAINST ("fade" sees
+    `"<spell> (<target>)"`, "cast" sees `"<caster>: <spell>"`). The panel
+    renders it, because a pattern aimed at the wrong half of the string
+    fails silently and forever.
+  - **`load_rules()` drops disabled rules; `all_rules()` does not.** An
+    editor needs the disabled ones — they are what it exists to switch back
+    on — and the seeded examples all ship disabled, so the enabled-only
+    `GET /api/tracked-rules` reported an EMPTY list on every fresh install.
+  - `POST /api/tracked-rules` replaces the set WHOLE (no merge: a list has
+    no per-field identity, and merging makes deletion impossible — the
+    opposite of the API-key rule). Written atomically; every reader,
+    including the overlay in its own process, picks it up by mtime.
+  - "cast" fires OUTSIDE the encounter window on purpose: a mob's cast line
+    is the only warning before it lands, and the most useful one is the
+    fight that has not started yet.
   BUILT-INS need no rules: "You have been summoned!" and your name in
   group/guild/raid chat always alert. Tells parse BEFORE the chat guard
   (Tell/GroupChat events; group_chat never enters the ledger/WS). Fired
   alerts ride snapshot["alerts"]; the OVERLAY renders the banner and
-  plays the winsound chime (nothing else beeps). GET /api/tracked-rules
-  shows the parsed rules. TTS deliberately omitted — point users at
-  the standalone eql-alerts app for voice callouts.
+  plays the winsound chime (nothing else beeps) — it paints
+  `"<kind>: <text>"` generically, so a NEW kind needs no overlay change.
+  Rules are edited under Settings ▸ Triggers (TriggerSettings.tsx, which
+  renders the kind list from the API the way the overlay switchboard
+  does). TTS deliberately omitted — point users at the standalone
+  eql-alerts app for voice callouts.
+  - Still NOT GINA: no matching on arbitrary log lines (only the kinds
+    above), no regex or capture groups, no per-trigger text/sound/timer,
+    no package import. Those are in TODO.md, and the no-regex rule is a
+    decision to revisit deliberately, not to erode.
 - **Overlay hotkeys are POLLED, not registered** (`_poll_hotkeys`, extending
   what Ctrl+Alt+X already did): the overlay is click-through and unfocused, so
   it receives no key events, and `RegisterHotKey` would need its own message
@@ -521,6 +591,8 @@ throttled `state` pushes. REST highlights (see main.py for all):
 - `POST /api/overlay` — toggle (launches or kills; `GET` reports state)
 - `GET/POST /api/overlay/prefs` — section/field visibility (below); the
   GET also serves the SCHEMA and PRESETS the Settings panel renders from
+- `GET/POST /api/tracked-rules` — alert rules; GET includes DISABLED rules
+  and the kind list, POST replaces the set whole
 - `GET/POST /api/ocr/*` — screen-OCR position feed config
 
 ## Atlas invariants (hard-won — do not "fix")
@@ -566,11 +638,50 @@ throttled `state` pushes. REST highlights (see main.py for all):
     `normalize_zone()` leaves it. "estate of unrest" → "The Estate of
     Unrest" pointed at a nonexistent key (the article is already stripped)
     and suppressed the direct hit that would otherwise have worked.
+  - **The ZEM sheet and map_system are TWO NAME SPACES — bridge them with
+    `game_data.zem_entry_for()`, never by comparing strings.** The hunting
+    sheet keys on WIKI names ("The Hole", "Mistmoore Castle", "Western
+    Karana"); the log, tracker and map_system key on the GAME's ("Ruins of
+    Old Paineel", "Castle Mistmoore", "West Karana"). Nine zones spelled
+    differently and nothing reconciled them, which broke BOTH directions:
+    the leveling chart could recommend a zone that `find_route_ex` then
+    could not resolve ("no route known" for a zone two hops away), and
+    looking up the zone you are STANDING in answered "not in the sheet"
+    while its row sat there under the other spelling — a camp-value
+    prototype cheerfully advised moving to The Hole while standing in it.
+    Both sides reduce to `_canonical()` first, the same fix
+    `/api/trio-compare` uses for `class_str`. `hunting_candidates()` now
+    also returns `key` (the map spelling, or None when genuinely
+    unplaceable). `scripts/zone_coverage.py` fails if any sheet name stops
+    bridging; it was 64/73 before 2026-08-09 and is 73/73 now.
+  - **The client ships the authoritative roster: `Resources/ZoneNames.txt`**
+    (`id^long name^lo^hi`). The long name is EXACTLY what "You have entered
+    X." prints, and `lo`/`hi` are `0^0` for every zone EQL does not run — 77
+    live zones at launch, out of 699 rows. `scripts/zone_coverage.py` walks
+    it through `_canonical()`, so a zone we cannot chart is found BEFORE a
+    player walks into it. **Do not guess a short name from the long one**:
+    `spells_us.txt` teleport rows carry `name^0^<short zone>` (row 54915 is
+    how "The Ruins of Old Paineel" was proven to be `hole`), and the .s3d
+    must exist on disk. That pairing is the evidence the no-fuzzy rule
+    demands.
   - `_canonical()` logs an unresolved zone once. A miss fails SILENTLY —
     the panel just shows nothing — which is how New Sebilis Expedition went
-    53 visits with no chart while sebilis.txt/.s3d sat in the game folder.
-    Re-audit after a patch by counting "You have entered" names from a real
-    log through `load_map`.
+    53 visits with no chart while sebilis.txt/.s3d sat in the game folder,
+    and how 14 more (The Hole, both Neriak dash spellings, the Planes, the
+    Warrens, Runnyeye, Splitpaw, Mistmoore, the Qeynos Aqueducts) survived
+    to 2026-08. Run the coverage script after a patch rather than waiting
+    for the report.
+  - **An alias is consulted BEFORE the direct `ZONE_FILES` hit, so a bad one
+    is worse than none.** `"castle mistmoore" -> "Mistmoore Castle"` pointed
+    at a key that does not exist AND suppressed `"Castle Mistmoore"`, which
+    was right there and would have worked. Same shape as the Estate of
+    Unrest note above; the coverage script catches both.
+  - Zones reached only by ritual (the Planes) get ZONE_FILES entries but no
+    ZONE_GRAPH edges — chart and 3D work, routing to them does not.
+    `Lake Nerius` is an .eqg zone: chart-only, since geometry_system reads
+    s3d/wld. `Plane of Hate` resolves to the 2001 revamp `hateplaneb` (the
+    client keeps both files; only hateplaneb has EQL emitter resources), with
+    the original as fallback — swap the candidate order if a layout is wrong.
 - Routing (`find_route_ex`, /api/route): walk edges + NAVAL TRANSLOCATOR
   dock cliques (any dock -> any dock on the route, one hop; boats do not
   exist on EQL) + druid/wizard PORT RITUALS as jump-from-anywhere edges
@@ -1431,6 +1542,11 @@ model selection itself is runtime-switchable in the UI.
 - **Parser coverage** (after any EQL patch): iterate your real log through
   `parse_line`, `Counter` the event types — a vanished category means the
   log format changed; fix `parser.py`.
+- **Zone coverage** (after any EQL patch, and whenever a zone is added):
+  `python scripts/zone_coverage.py` — runs every zone in the client's own
+  `Resources/ZoneNames.txt` through `_canonical()`. `MISS` is a bug in
+  ZONE_FILES/ZONE_ALIASES; `NOFILE` usually just means the zone ships no
+  stock chart. Exits non-zero on any MISS.
 - **Simulated combat** (no game needed): append a line to the watched log —
   `[<timestamp>] You crush a test dummy for 42 points of damage.` — the
   ledger updates within ~0.5s. Tag synthetic rows unmistakably ("test
