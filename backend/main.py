@@ -635,7 +635,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.6.1"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.7.0"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -1895,6 +1895,53 @@ async def advisor_revise():
     return revised
 
 
+def _items_including_pet(inv) -> list:
+    """Owned items, with what the PET is holding folded in.
+
+    Pet gear arrives from `/pet inventory check` and lives on the tracker,
+    not in the inventory export, so the gear advisor never saw it. That is
+    one-directional in a way nobody would choose: the app happily tells you
+    to hand a better item DOWN to the pet, while a Ringmail Coat +6 sits on
+    the pet and the player wears worse.
+
+    Marked `where: "pet"` so a recommendation says where the item actually
+    is -- taking it back off the pet is a real action with a cost, and the
+    row should say so rather than implying it is sitting in a bag.
+    """
+    items = list((inv or {}).get("items") or [])
+    for slot, name in (getattr(tracker, "pet_inventory", None) or {}).items():
+        if not name or str(name).strip().lower() in ("empty", "none"):
+            continue
+        items.append({"name": str(name), "where": "pet", "loc": f"pet:{slot}"})
+    return items
+
+
+@app.get("/api/quests")
+async def get_quests():
+    """Owned items matched to the quests that reference them.
+
+    Read-only and wiki-cached: the same item pages the gear hover cards
+    already mine, joined to quest pages for the giver, zone, level and
+    reward. Deliberately no progress percentage -- required counts live in
+    walkthrough prose, and a number scraped from a sentence would send
+    someone farming the wrong amount.
+    """
+    from backend import quests as quests_mod
+    inv = load_export(tracker.name, tracker.server, "Inventory")
+    items = (inv or {}).get("items") or []
+    if not items:
+        return {"quests": [], "note": "No inventory export found — type "
+                                      "/outputfile inventory in-game, then "
+                                      "press check exports."}
+    try:
+        rows = await quests_mod.quests_for_items(items, level=tracker.level)
+    except Exception as exc:
+        logger.exception("quest scan failed")
+        raise HTTPException(500, f"quest scan failed: {str(exc)[:120]}")
+    return {"quests": rows, "items_scanned": len({i.get("name") for i in items}),
+            "level": tracker.level}
+
+
 @app.get("/api/gear")
 async def get_gear(refresh: bool = False, cached: bool = False):
     """Equipment counsel: best owned item per slot + farming targets.
@@ -1936,7 +1983,7 @@ def _gear_ctx(inv=None) -> dict:
     return {"class_str": tracker.class_str, "level": tracker.level,
             "race": tracker.race, "playstyle": tracker.playstyle,
             "worn": (inv or {}).get("worn"),
-            "inventory_items": (inv or {}).get("items"),
+            "inventory_items": _items_including_pet(inv),
             "exaltations": (inv or {}).get("exaltations"),
             "item_sockets": (inv or {}).get("item_sockets"),
             "loot_filter": lf["actions"] if lf else None,

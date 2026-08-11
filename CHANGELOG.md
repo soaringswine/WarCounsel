@@ -44,6 +44,75 @@ a reload and a relaunch — that is what lets "why that pick?" span
 sessions — but there was no way to clear one, so a conversation from days
 ago greeted every launch and rode into every new answer as history.
 "clear thread" beside the ask box deletes it, for that character only.
+## v2.7.0 — 2026-08-10
+
+**New: a Quests tab.** Your inventory export says what you are carrying,
+item wiki pages say which quests want each item, and quest pages carry the
+giver, zone, level and reward. Joined together, a bag of oddments becomes a
+list of things you are already partway through. On one character, 127 items
+matched 54 quests — including a Thex Mallet with both the hilt and the head
+sitting in different places.
+
+Grouped by what the quest is FOR — race unlocks, class quests, equipment,
+spells, faction turn-ins — using the wiki's own categories rather than
+labels we invented. Race unlocks name the race, class quests name the
+classes. Out-of-era content (Kunark and later, which this game does not
+implement) sits in its own section at the bottom: the items are real and in
+your bags, so the section answers "why am I carrying this".
+
+**Progress bars, where the number is actually known.** The race-unlock table
+states exact totals and your export states exact stack sizes, so those rows
+show real progress — 42/800 toward Froglok. Wiki quests get no bar, because
+their counts live in walkthrough prose and a number scraped from a sentence
+would send you farming the wrong amount. A bar on some rows and not others
+is the honest version of knowing one number and not the other.
+
+**Fixed: stack sizes were being thrown away.** The inventory export's count
+column was parsed and discarded, so 27 gnoll fangs and 42 phosphorous
+powder both read as one item. This affected anything that counted what you
+own.
+
+**Fixed: a wiki outage used to persist after the wiki recovered.** A timeout
+and a missing page looked identical to the code, so a timeout was cached as
+"this item has no data" — for an hour, or a day for vendor lookups. One
+outage could empty the quest tab and keep it empty. Failures are now told
+apart from answers, and never cached.
+
+**The Encounter panel can be collapsed**, like the War Ledger, and the
+Quests tab has the same A−/A+ text size control the Encounter panel has.
+
+## v2.6.2 — 2026-08-10
+
+**Leveling-chart zones now route.** The community hunting sheet spells some
+zones the wiki's way ("Mistmoore Castle", "The Hole", "Western Karana")
+while the log and the map use the game's ("Castle Mistmoore", "Ruins of Old
+Paineel", "West Karana"). Nine of its 73 zones differed and nothing
+reconciled them, so the chart could recommend somewhere the route finder
+then called unknown — and standing in a zone could report it as missing
+from the sheet while its row sat there under the other name.
+
+**Gear advice now looks at what your pet is carrying.** Pet inventory
+arrives from `/pet inventory check` and never reached the gear consult, so
+the app would hand items down to the pet but never notice the pet holding
+something better than you wear.
+
+**New: a surplus list** of things you can clear out. Deliberately ignores
+your classes — you will swap trios, so "your current classes cannot use
+this" is no reason to sell anything. Only two things qualify: a lower rank
+of an item you already own, and anything the wiki calls vendor trash. If
+the app is not sure, it says nothing rather than guessing, because the
+action it suggests cannot be undone.
+
+**Fixed: the updater blamed the wrong thing.** A failed update told everyone
+to `git stash`, which only helps if you have edited files. If you had
+committed something locally the advice did nothing and you stayed stuck.
+It now asks git which case it is and prints the command that actually
+applies — stash for edits, rebase or reset for commits.
+
+**Fixed: the packaged OCR build.** The v2.6.1 build job hung for nearly two
+hours because CI runs Python 3.13, where the OCR engine ships without its
+models and downloads them on first use. Pinned to 3.12, where the models
+travel with the package.
 
 ## v2.6.1 — 2026-08-09
 

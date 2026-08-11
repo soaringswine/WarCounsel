@@ -2779,3 +2779,102 @@ button.app-version:hover { color: var(--gold-bright); }
    hiding of closed content, so the pickers stayed on screen while the
    toggle read closed. Hide them explicitly. */
 .adv-trio:not([open]) .adv-trio-fields { display: none; }
+
+/* --- Quests -------------------------------------------------------------
+   One row per quest: the items you are already carrying for it, then where
+   it starts. No progress bar — the required count is prose on the wiki and
+   guessing it would send someone farming the wrong amount. */
+.quest-row {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(200, 170, 110, .14);
+}
+.quest-head a { color: var(--gold, #c8aa6e); text-decoration: none; }
+.quest-head a:hover { text-decoration: underline; }
+.quest-head [data-warn] { color: #d4574a; }
+.quest-items { display: flex; flex-wrap: wrap; gap: 10px; margin: 3px 0 2px; font-size: 11.5px; }
+.quest-item strong { color: var(--milestone, #c8aa6e); margin-left: 4px; }
+.quest-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 10.5px;
+  color: var(--muted, rgba(226, 222, 214, .58));
+}
+.quest-meta .quest-reward { color: #1fb38c; }
+
+/* A collapsed Encounter panel shrinks to a slim vertical strip, the same
+   treatment the ledger gets — the first attempt only hid the body, so the
+   panel kept its full 760px column and nothing appeared to happen.
+   Specificity is why: the ledger's rule carries :not([data-combat]) as
+   well as :has(), and a plain .hud-grid:has() loses to it whenever the
+   ledger is also collapsed. These match its shape, and the third rule
+   handles both being shut at once, which the single rule could not
+   express at all. */
+.enc-panel[data-collapsed] { max-height: none; }
+
+.hud-grid:not([data-combat]):has(.enc-panel[data-collapsed]) {
+  grid-template-columns: 320px minmax(380px, 1fr) minmax(380px, 1fr) 42px;
+}
+.hud-grid:not([data-combat]):has(.ledger-panel[data-collapsed]):has(.enc-panel[data-collapsed]) {
+  grid-template-columns: 320px minmax(380px, 1fr) 42px 42px;
+}
+@media (min-width: 1920px) {
+  .hud-grid:not([data-combat]):has(.enc-panel[data-collapsed]) {
+    grid-template-columns: 340px minmax(760px, 1fr) minmax(420px, 1fr) 42px;
+  }
+  .hud-grid:not([data-combat]):has(.ledger-panel[data-collapsed]):has(.enc-panel[data-collapsed]) {
+    grid-template-columns: 340px minmax(760px, 1fr) 42px 42px;
+  }
+}
+
+/* the strip itself: title turned on its side, controls out of the way */
+.hud-grid:not([data-combat]) .enc-panel[data-collapsed] .panel-title {
+  writing-mode: vertical-rl;
+  height: 100%;
+  border-bottom: none;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 10px;
+}
+.hud-grid:not([data-combat]) .enc-panel[data-collapsed] .font-scale,
+.hud-grid:not([data-combat]) .enc-panel[data-collapsed] .enc-nav {
+  display: none;
+}
+
+/* What a quest unlocks — the race, or the classes it is limited to. The
+   heading says "Race unlocks"; this says WHICH, so the row does not have
+   to be opened to find out. */
+.quest-unlocks {
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: #1fb38c;
+  border: 1px solid rgba(31, 179, 140, .38);
+}
+
+/* Progress toward an unlock. Present only when the required total is
+   actually known — see QuestPanel. Flat and square like every other gauge
+   in the app. */
+.quest-progress {
+  position: relative;
+  height: 16px;
+  margin: 4px 0 3px;
+  background: rgba(0, 0, 0, .34);
+  border: 1px solid rgba(200, 170, 110, .22);
+}
+.quest-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: rgba(31, 179, 140, .34);
+}
+.quest-progress span {
+  position: relative;
+  display: block;
+  padding: 0 6px;
+  font-family: var(--mono, "IBM Plex Mono", monospace);
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--ink, #e2ded6);
+}
