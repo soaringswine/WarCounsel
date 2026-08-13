@@ -635,7 +635,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.7.0"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.8.2"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -943,6 +943,15 @@ async def generate_spellset(body: dict | None = None):
     from backend.agent.advisor import _permanent_buffs, stack_gem_order
     from backend.game_data import _primary_effect as game_data_primary
     from backend.game_data import supersedes_for_slots
+    # Off unless the player switched it on. This is the only file the app
+    # writes inside the game folder, so it is their call to make, not the
+    # installer's -- and the gate lives here rather than only in the UI,
+    # because a button being hidden is not the same as an endpoint being
+    # closed.
+    if not settings.allow_spellset_write:
+        raise HTTPException(403, "Writing spell sets is switched off. Turn on "
+                                 "\"Write spell sets into the game folder\" "
+                                 "under Settings to enable it.")
     source = ((body or {}).get("source") or "loadout").strip()
     default_name = _set_name_for_trio(source)
     name = ((body or {}).get("name") or default_name).strip()[:24]
@@ -1612,6 +1621,10 @@ async def api_settings_get():
             "context": _context_info(),
         },
         "overrides": sorted(overrides().keys()),
+        # Reported as a real boolean, resolved the same way the endpoint
+        # resolves it -- so the switch cannot show one thing while the gate
+        # does another.
+        "allow_spellset_write": bool(settings.allow_spellset_write),
         # Bundled-data health. Packaged builds resolve these out of the
         # PyInstaller bundle, where a missing --add-data entry fails soft;
         # surfacing the counts lets the release build assert they arrived.
@@ -1633,6 +1646,7 @@ async def api_settings_set(body: dict):
     """Persist settings. Keys go to data/secrets.json, everything else to
     data/app_config.json; an omitted key field is left untouched, so saving
     other settings never has to resend a secret the UI was never shown."""
+    from backend.app_config import apply as apply_config
     from backend.app_config import update as update_config
     from backend.llm_runtime import clear_cache, set_active, active
     from backend.secrets_store import FIELDS as SECRET_FIELDS, update as update_secrets
@@ -1652,10 +1666,10 @@ async def api_settings_set(body: dict):
         game_changed = wanted != settings.eql_game_dir
     if config_in:
         update_config(config_in)
-        # apply in-memory so the change takes hold without a restart
-        for field, value in update_config({}).items():
-            if hasattr(settings, field):
-                setattr(settings, field, value)
+        # apply in-memory so the change takes hold without a restart, through
+        # the same coercion the startup validator uses -- this loop used to
+        # be written out here and assigned the raw string
+        apply_config(settings)
         if game_changed:
             game = Path(settings.eql_game_dir)
             settings.eql_log_dir = str(game / "Logs")
@@ -1916,6 +1930,22 @@ def _items_including_pet(inv) -> list:
     return items
 
 
+@app.get("/api/panel/prefs")
+async def get_panel_prefs():
+    """What each web panel shows, plus the schema the UI renders from."""
+    from backend import panel_prefs
+    return panel_prefs.schema()
+
+
+@app.post("/api/panel/prefs")
+async def post_panel_prefs(body: dict):
+    """Merge a partial change. A preset name replaces the lot."""
+    from backend import panel_prefs
+    if body.get("preset"):
+        return {"prefs": panel_prefs.apply_preset(str(body["preset"]))}
+    return {"prefs": panel_prefs.save(body or {})}
+
+
 @app.get("/api/quests")
 async def get_quests():
     """Owned items matched to the quests that reference them.
@@ -1938,7 +1968,12 @@ async def get_quests():
     except Exception as exc:
         logger.exception("quest scan failed")
         raise HTTPException(500, f"quest scan failed: {str(exc)[:120]}")
-    return {"quests": rows, "items_scanned": len({i.get("name") for i in items}),
+    names = sorted({str(i.get("name")) for i in items if i.get("name")})
+    # The NAMES, not just the count. Searching the tab for something you
+    # just looted has three honest answers -- a quest wants it, you are
+    # carrying it and no quest page mentions it, or it is not in your bags
+    # at all -- and the panel cannot tell the last two apart from a count.
+    return {"quests": rows, "items_scanned": len(names), "items": names,
             "level": tracker.level}
 
 

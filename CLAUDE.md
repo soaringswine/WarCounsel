@@ -427,6 +427,51 @@ hours-to-level estimate (exact only after a same-session ding).
   - `SECTIONS`/`PRESETS` are the single source of truth: the panel renders
     from them over the API, so the switchboard cannot drift from what the
     overlay paints. Presets are `Everything`, `Combat focus`, `Meter only`.
+
+## The WEB panels have their own switchboard
+
+`backend/panel_prefs.py` -> `data/panel_prefs.json`, edited under Settings,
+and DELIBERATELY separate from the overlay's. A 42px strip and a 340px
+column answer different questions -- you want a damage meter and nothing
+else while fighting, and the full session ledger while planning -- so one
+shared set of toggles would mean hiding deaths mid-fight also hides them
+when you sit down. Same SHAPE as the overlay's (per section, per field,
+defaults all on, `save()` merges onto current, `SECTIONS`/`PRESETS` are the
+source of truth the panel renders from), so there is one pattern to learn.
+
+- `frontend/lib/panelPrefs.ts` fetches once and re-reads on an
+  `eql:panel-prefs` event the Settings pane fires after each save, so a
+  toggle lands without a reload. **`show()` returns TRUE when the prefs have
+  not arrived or the key is unknown** — a settings feature that blanks the
+  UI while loading its own config is worse than no settings feature.
+- Ledger rows key on the EVENT TYPE (`LEDGER_FIELD`), not on `classify()`'s
+  colour kind: "milestone" covers a level-up, a coin split and a faction hit
+  at once, so hiding loot by colour would take the ding with it. An unlisted
+  or brand-new type falls to `misc` and still renders.
+- **The HUD grid's column widths now live in `page.tsx`, not CSS.** They
+  depend on three things at once — which panels Settings left on, which are
+  collapsed to a 42px strip, and the viewport — and the old form was four
+  hand-written `:has()` combinations that each assumed all four panels
+  existed. Switching one off made every one of them wrong. React writes
+  `--hud-cols` / `--hud-cols-wide`; the stylesheet's rules consume them so
+  the media queries still decide which applies. The panels announce a
+  collapse with an `eql:collapse` window event.
+- Combat-mode and slim-ledger rules address `.vitals-panel` / `.enc-panel`
+  by CLASS. `> .panel:last-child` silently retargeted the ledger the moment
+  the encounter panel was switched off.
+- **The Quests search matches over EVERY loaded row and lifts the 25-row
+  cap** — a filter that only sees what is already on screen finds nothing
+  and reads as broken. It covers item names, quest names, givers, zones,
+  unlocks and rewards, so the not-found message says exactly that rather
+  than claiming it only searched your bags.
+- **`GET /api/quests` returns the scanned item NAMES, not just the count**,
+  because an empty search result has two very different causes: you are
+  carrying the thing and no quest page wants it, or it is not in your bags.
+  The first is the answer to "is this worth keeping" and a count cannot
+  express it. The wording stops short of "safe to sell" — the wiki not
+  tying an item to a quest is not evidence that nothing does.
+- Quests is a TAB, not a column, so its switch hides the tab button; if it
+  was the open tab the Advisor shows rather than an empty stack.
   - When exactly ONE section survives, its header is SUPPRESSED — there is
     nothing to tell it apart from, and the 15px buys another row.
 - **Timers are depleting tracks, not a text list** — the one place besides
@@ -606,6 +651,13 @@ throttled `state` pushes. REST highlights (see main.py for all):
   (they read as phantom ceilings). Ceilings are never extracted.
 - 3D camera: follow mode translates camera + orbit target by the hero's
   delta (user angle/zoom preserved); panning off-target releases the lock.
+- **Difficulty comes in TWO shapes.** `RE_DIFFICULTY` handled the
+  parenthetical form ("Befallen 4 (Refined)") and nothing handled the bare
+  tier EQL appends to instanced zones ("Plane of Hate D1"), so a public D1
+  instance charted as nothing at all — issue #7. `RE_DIFF_TIER` strips it.
+  Verified against the client's own `Resources/ZoneNames.txt` first: no zone
+  in any of the 699 rows ends in D<digits>, so the strip cannot eat a real
+  name. That check is the evidence the no-fuzzy rule demands.
 - Zone names: `normalize_zone()` strips DECORATORS only — difficulty suffix
   ("Befallen 4 (Refined)"), leading article, and EQL's "Expedition" instance
   wrapper ("New Sebilis Expedition" → "New Sebilis"). New zone = `ZONE_FILES`
@@ -727,6 +779,61 @@ display**; failing entries are dropped and logged, never shown. The gates
   rank-1 records fall back past id-10 charisma spacers). Owned picks
   superseded by another owned usable spell are dropped.
 - Long-duration buffs route to a separate `prebuffs` section.
+- **A pre-buff is decided by TARGET and EFFECT, not by duration.** Owning a
+  spell that lasts 14 minutes says nothing about whether you cast it on
+  yourself before a pull. Ensnare was offered as a pre-buff because nothing
+  asked who it lands on, and Treeform because nothing asked what it does —
+  self-target, 36 minutes, and it roots you in place. `_is_prebuff()` is the
+  one test all three paths share (`_long_buffs` for the prompt,
+  `_backfill_prebuffs` for the deterministic additions, `_gate_prebuffs` for
+  the verifier); before it, each checked a different subset.
+  - `_BUFFABLE_TARGETS = {6, 41, 43, 51}` — self, single friendly, and the
+    two group forms. Read off spells whose purpose is unambiguous (Stun,
+    Fear and Ensnare are 5; Befriend Animal is 9; Feral Spirit is 14) rather
+    than assumed from the id, the same evidence rule the zone table follows.
+  - Root (SPA 99) and charm (22) joined `_NOT_A_BUFF_SPAS` alongside
+    invisibility and the remote eye.
+- **Cap AFTER supersession, never before.** The spellbook runs low level to
+  high, so truncating it kept Skin like Rock and Center and cut the Skin
+  like Steel and Symbol of Transal that replace them. Identical in shape to
+  the `missing_spells` shopping list, where an ascending cap kept the 25
+  LOWEST and anyone with a backlog got an empty list.
+- **`_gate_stacking` must consider EVERY claimed slot.** It used to `break`
+  at the first one, so a spell occupying two slots resolved one conflict and
+  stopped: Skin like Steel displaced Center on `ac-slot-1` and never reached
+  `druid-spell-lines-hp-ac`, where Skin like Rock was still sitting, so the
+  pair it supersedes survived beside it. Displaced entries are TOMBSTONED
+  rather than removed — `claimed` holds indices into `kept`, and compacting
+  mid-loop invalidates them.
+- **Equal magnitudes are broken by the PLAYSTYLE, not by list order.** Skin
+  like Steel and Protection of Steel are the same 50 AC / 50 HP for the same
+  36 minutes; the only difference is who else it lands on. `_effect_shape`'s
+  fallback kept whichever came first, which handed a `solo_dps` character
+  the group form of every armour buff. `_prefers_group()` decides it —
+  solo prefers the single-target twin, grouped prefers the group one. A
+  TIE-BREAK only: a stronger group buff still beats a weaker single one.
+- A group form the curated table does not carry inherits its twin's verdict
+  when the player owns that twin (paired on identical effect SHAPE and
+  magnitude, never on the name — "Protection of" resembling "Skin like" is
+  what the no-fuzzy rule exists to prevent). When the twin is NOT owned the
+  group form survives uncompared, which is the partial-coverage rule working
+  as intended. **Do not "fix" that with a subset rule** — Holy Armor's
+  effects are a subset of Skin like Steel's at lower magnitudes, and it
+  occupies `ac-slot-4`, so the two genuinely stack; a subset rule would drop
+  exactly the buff this section was fixed to restore.
+- **Pre-buffs are capped at `spell_slots`, the same gem count as the
+  loadout** (`_cap_prebuffs`). They are cast by memorizing one, casting it
+  and swapping the gem back, so a seventeen-entry routine against a
+  fourteen-slot book describes something nobody can do in one pass — and the
+  overflow was silent. PERMANENTS are kept first wherever they were
+  proposed: cast once, held until death, so they earn a gem far more cheaply
+  than anything re-cast between pulls. The prompt states the same limit; the
+  cap enforces it, per the house rule that the gate is authoritative.
+- **Magnitude orders the pre-buff list; it must not decide membership.**
+  "hit points 50" over "armor class 21" over "strength 5" ranks three
+  unrelated numbers. Sorting by it and then capping at 8 is how Holy Armor,
+  Strength of Earth and Shield of Brambles went missing — small numbers,
+  real buffs, nothing superseding them.
 - **Locations are gated against the community Recommended-Levels table**:
   the raw WIKITEXT is parsed (the rendered page collapses empty cells) from
   in-era sections only (Antonica/Odus/Faydwer + Planes of Fear/Hate/Sky —
@@ -1486,6 +1593,21 @@ model selection itself is runtime-switchable in the UI.
 
 ## Settings & secrets (the gear in the header)
 
+- **`app_config` stores every override as a STRING, and neither caller
+  validates on assignment** — so `"false"` lands on a bool field intact and
+  reads as TRUE. `allow_spellset_write` saved correctly, the file on disk was
+  right, and the flag stayed on. `app_config.apply(target)` is now the single
+  place that pushes overrides onto a settings object and coerces against what
+  the field already holds; the startup validator and `POST /api/settings` had
+  each written that loop themselves, so the bug existed twice.
+- **`allow_spellset_write` is OFF by default** (`config.py`, allow-listed in
+  `app_config.FIELDS`, switched under Settings ▸ General). Writing the
+  `[SpellLoadouts]` section of `LO*.ini` is the ONLY thing this app writes
+  inside the game folder, and it is the one place a strict reading of the
+  Daybreak Terms has anything to bite on — so it is the player's decision,
+  not the installer's. Same reasoning that keeps `eqclient.ini` read-only.
+  The gate lives on the ENDPOINT, not only in the UI: a hidden button is not
+  a closed endpoint.
 - **Three layers, and they do not mix.** `.env` is the base; the UI writes
   non-secret overrides to `data/app_config.json` (applied in `config.py`'s
   validator BEFORE Logs/ and maps/ derive, so a folder chosen in the panel
@@ -1572,7 +1694,7 @@ model selection itself is runtime-switchable in the UI.
 
 ## Releasing
 
-Latest: **v2.1.13**. MCP server clone at `MCP_SERVER_DIR` is
+Latest: **v2.8.2**. MCP server clone at `MCP_SERVER_DIR` is
 **ArtSabintsev/everquest-legends-mcp** — note a DIFFERENT project shares that
 name (Sergeantfirstclass...); it has no tags and no `src/data/eqlbuilds`, so
 builds_data.py finds nothing there. Local clone is on **v1.3.4**; **v1.3.5**

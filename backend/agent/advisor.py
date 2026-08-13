@@ -75,7 +75,7 @@ Rules:
   - must_have: the core spells that should always be memorized, in priority order (typically 5-7).
   - should_have: fills the REMAINING slots, in priority order — must_have + should_have together must total EXACTLY __SLOTS_NOTE__ picks.
   - nice_to_have: 10-14 EXTRA alternatives beyond the slot count, in priority order, so the player can swap by situation (different zone, tougher pulls, low mana).
-- prebuffs: every entry's reason must say WHAT IT DOES and why it matters for this focus, using the effect shown beside it — "Permanent buff." is not a reason. Include long buffs worth re-casting between pulls, not only permanent ones. Separate from the loadout — list PERMANENT buffs (marked in the character data) FIRST: they persist until death, are cast exactly once, and must never be described as needing refreshing. Then long-duration self-buffs worth keeping up (damage shields like Bramblecoat, AC/HP buffs, Spirit of Wolf). The player memorizes one temporarily, casts it, then swaps the slot back to combat spells — so do NOT waste loadout slots on long buffs; put them here. Owned and level-legal only.
+- prebuffs: every entry's reason must say WHAT IT DOES and why it matters for this focus, using the effect shown beside it — "Permanent buff." is not a reason. Include long buffs worth re-casting between pulls, not only permanent ones. Separate from the loadout — list PERMANENT buffs (marked in the character data) FIRST: they persist until death, are cast exactly once, and must never be described as needing refreshing. Then long-duration self-buffs worth keeping up (damage shields like Bramblecoat, AC/HP buffs, Spirit of Wolf). The player memorizes one temporarily, casts it, then swaps the slot back to combat spells — so do NOT waste loadout slots on long buffs; put them here. Owned and level-legal only. At most __SLOTS_NOTE__ entries: they are memorized to be cast, so a longer routine does not fit the book in one pass.
 - If the character data says NO PET, never recommend pet spells of any kind — no pet haste, no shrink, no pet heals, no pet buffs. They target a pet slot that will be empty. Summoned-pet lines (skeletons, elementals, warders): only ever slot the HIGHEST-level pet the character owns — older ranks are strictly weaker versions of the same pet.
 - Respect the focus STRICTLY: for solo focuses, never slot group-only utility — resurrection and corpse-recovery lines, buffs that can only target others — those are dead slots when playing alone.
 - If a "Missing spells they could BUY" list is present, fold the best purchases into note or horizon (say they are vendor purchases).
@@ -413,7 +413,56 @@ _SELF_TARGET = 6
 # long time and land on you, so every structural test for a buff passes --
 # but you cast them for a specific pull, not as part of buffing up, and
 # they were crowding the real buffs out of the list.
-_NOT_A_BUFF_SPAS = _NOT_PERM_SPAS | {67, 12, 28}
+# 99 is root and 22 is charm. Treeform is a self-target 36-minute spell, so
+# every structural test for a pre-buff passed -- and it plants you in the
+# ground. Befriend Animal and Charm Animals last 20 minutes and are cast on
+# something you intend to fight beside, not on yourself.
+_NOT_A_BUFF_SPAS = _NOT_PERM_SPAS | {67, 12, 28, 99, 22}
+
+# targetTypeId, read off spells whose purpose is unambiguous rather than
+# assumed from the id: 5 is an enemy (Stun, Fear, Lightning Bolt, Ensnare),
+# 9 an animal you are charming (Befriend Animal), 14 your pet (Feral
+# Spirit). What is left is 6 self (Yaulp, Bramblecoat), 51 a single friendly
+# target (Center, Holy Armor, Symbol of Transal) and 41/43 their group
+# versions (Protection of Steel, Scale of Wolf).
+_BUFFABLE_TARGETS = {6, 41, 43, 51}
+# ...of which 41 and 43 are the GROUP forms (Protection of Steel is the group
+# twin of Skin like Steel, Scale of Wolf of Spirit of Wolf).
+_GROUP_TARGETS = {41, 43}
+
+
+def _prefers_group(name: str, solo: bool) -> int:
+    """Tie-break between a buff and its group twin. Higher wins.
+
+    Skin like Steel and Protection of Steel are the same 50 AC and 50 HP for
+    the same 36 minutes; the only difference is who ELSE it lands on. On
+    equal magnitudes the shape fallback kept whichever happened to come
+    first in the list, which is how a SOLO focus was handed the group
+    version of every armour buff. Solo, the group form lands on nobody else
+    and is at best equal; grouped, it is the entire point.
+
+    A TIE-BREAK only -- a stronger group buff still beats a weaker single
+    one, because that magnitude is a real difference and this is not.
+    """
+    from backend import builds_data
+    grp = (builds_data.spell_entry(name) or {}).get("targetTypeId") in _GROUP_TARGETS
+    return int(grp != solo)
+
+
+def _is_prebuff(e: dict) -> bool:
+    """Does this spell leave a lasting effect on YOU or your group?
+
+    Both halves were a bug before they were a check. The TARGET matters
+    because Ensnare is a 14-minute effect and nothing asked who it lands on,
+    so a snare was offered as something to cast before a pull. The EFFECT
+    matters because Treeform is self-target and long and roots you in place.
+    Duration and ownership say nothing about either.
+    """
+    from backend.game_data import _primary_effect
+    if e.get("targetTypeId") not in _BUFFABLE_TARGETS:
+        return False
+    pe = _primary_effect(e)
+    return not (pe and pe[0] in _NOT_A_BUFF_SPAS)
 
 
 # How far ahead the horizon looks. The wiki/builds context already spans
@@ -460,7 +509,6 @@ def _long_buffs(ctx: dict) -> List[str]:
     other half of a pre-buff routine and was never mentioned.
     """
     from backend import builds_data
-    from backend.game_data import _primary_effect
     level = ctx.get("level")
     perm = {n.lower() for n in (ctx.get("_permanent") or [])}
     out = []
@@ -475,13 +523,22 @@ def _long_buffs(ctx: dict) -> List[str]:
         ticks = e.get("durationTicks") or 0
         if ticks < 100:          # under ~10 minutes: not worth a pre-cast
             continue
-        pe = _primary_effect(e)
-        if pe and pe[0] in _NOT_A_BUFF_SPAS:
+        if not _is_prebuff(e):
             continue
-        eff = _buff_effects(sp["name"])
-        out.append(f"{sp['name']} ({round(ticks * 6 / 60)}min"
-                   + (f", {eff}" if eff else "") + ")")
-    return out[:12]
+        out.append({"name": sp["name"], "level": sp["level"], "_ticks": ticks})
+    # Supersession runs BEFORE the cap. The spellbook is ordered low level to
+    # high, so truncating it kept Skin like Rock and Center and cut the Skin
+    # like Steel and Symbol of Transal that replace them -- the same failure
+    # the missing-spells shopping list had, where an ascending cap kept the
+    # 25 LOWEST and anyone with a backlog got an empty list.
+    kept, _sup = _gate_stacking(out)
+    kept.sort(key=lambda b: -(b.get("level") or 0))
+    lines = []
+    for b in kept[:24]:
+        eff = _buff_effects(b["name"])
+        lines.append(f"{b['name']} ({round(b['_ticks'] * 6 / 60)}min"
+                     + (f", {eff}" if eff else "") + ")")
+    return lines
 
 
 def _permanent_buffs(ctx: dict) -> List[str]:
@@ -800,7 +857,8 @@ async def _compose_builtin(ctx, bycat, replaced, grounded_any,
     # cast. The effects are in the spell record either way.
     prebuffs = [entry(i, (_buff_effects(i["name"]) or "positive-effect buff")
                       + " — cast it, then swap the slot back to combat spells")
-                for i in (bycat.get("buff") or [])[:6]]
+                for i in (bycat.get("buff") or [])]
+    prebuffs = _cap_prebuffs(prebuffs, ctx)
     horizon = []
     if level is not None:
         for s in book.get("castable", []):
@@ -1384,27 +1442,37 @@ def _gate_stacking(picks: List[dict]) -> tuple:
         if not slots:
             kept.append(pick)
             continue
-        loser = None
+        # EVERY claimed slot has to be considered, not the first one found.
+        # Skin like Steel occupies both ac-slot-1 and the druid hp/ac line;
+        # stopping at the first meant it displaced Center and never looked
+        # at the line where Skin like Rock was still sitting, so the pair it
+        # was supposed to replace survived alongside it.
+        beaten_by = None                 # slot where this pick is the weaker
+        displaces = []                   # (slot, index) this pick outranks
         for slot, position in slots.items():
             held = claimed.get(slot)
             if held is None:
                 continue
             held_pos, held_idx = held
             if position > held_pos:
-                loser = (slot, held_idx)       # incoming is the upgrade
+                displaces.append((slot, held_idx))
+            else:
+                beaten_by = slot
                 break
-            loser = (slot, None)               # incoming is the weaker one
-            break
-        if loser and loser[1] is None:
-            slot = loser[0]
-            dropped.append({**pick, "conflict_slot": slot,
-                            "conflict_with": kept[claimed[slot][1]]["name"]})
+        if beaten_by is not None:
+            dropped.append({**pick, "conflict_slot": beaten_by,
+                            "conflict_with": kept[claimed[beaten_by][1]]["name"]})
             continue
-        if loser:
-            slot, idx = loser
-            displaced = kept[idx]
-            dropped.append({**displaced, "conflict_slot": slot,
-                            "conflict_with": name})
+        if displaces:
+            # Tombstone rather than remove: `claimed` holds indices into
+            # `kept`, and compacting the list mid-loop invalidates them.
+            for slot, idx in displaces:
+                if kept[idx] is None:
+                    continue
+                dropped.append({**kept[idx], "conflict_slot": slot,
+                                "conflict_with": name})
+                kept[idx] = None
+            idx = displaces[0][1]
             kept[idx] = pick
             for sl_, pos_ in slots.items():
                 claimed[sl_] = (pos_, idx)
@@ -1412,7 +1480,7 @@ def _gate_stacking(picks: List[dict]) -> tuple:
         kept.append(pick)
         for sl_, pos_ in slots.items():
             claimed[sl_] = (pos_, len(kept) - 1)
-    return kept, dropped
+    return [k for k in kept if k is not None], dropped
 
 
 def _gate_aas(items: List[dict], owned: dict, meta: dict) -> List[dict]:
@@ -1715,6 +1783,7 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
         for d in _pre_clashes:
             logger.info("Dropped prebuff %s — %s occupies the same slot (%s)",
                         d["name"], d["conflict_with"], d["conflict_slot"])
+        prebuffs = _cap_prebuffs(prebuffs, ctx)
         for s in prebuffs:
             s["level"] = level_by_name.get(str(s["name"]).lower())
         replace = _clean_list(data.get("replace"), ("using", "upgrade", "why"),
@@ -2052,12 +2121,33 @@ def _annotate_stacking(picks: list, ctx: dict) -> list:
     from backend import spell_lines
     book = ctx.get("spellbook") or {}
     level = ctx.get("level")
+    solo = (ctx.get("playstyle") or "").startswith("solo")
     owned = [b["name"] for b in book.get("castable", [])
              if level is None or b.get("level", 0) <= level]
     for p in picks:
         name = p.get("name") or ""
         slots = spell_lines.slots_for(name) or {}
         if not slots:
+            # No curated entry -- but its TWIN may have one. The table knows
+            # Skin like Wood and not Protection of Wood, so a solo player was
+            # offered the group form of a buff two upgrades out of date:
+            # nothing could compare it to anything. An OWNED spell applying
+            # the identical effect set at the identical magnitude is the same
+            # buff by another delivery, so it inherits that spell's verdict.
+            # Paired on effect shape, never on the name -- "Protection of"
+            # resembling "Skin like" is the reasoning the no-fuzzy rule
+            # exists to prevent.
+            sh = _effect_shape(name)
+            for twin in (owned if sh else []):
+                if twin.lower() == name.lower() or _effect_shape(twin) != sh:
+                    continue
+                beats = [o for o in owned
+                         if o.lower() != twin.lower()
+                         and spell_lines.supersedes(o, twin)]
+                if beats:
+                    p["superseded_by"] = beats[0]
+                    p["_drop"] = True
+                break
             continue
         beaten_by = [o for o in owned
                      if o.lower() != name.lower() and spell_lines.supersedes(o, name)]
@@ -2089,7 +2179,15 @@ def _annotate_stacking(picks: list, ctx: dict) -> list:
         if prev is None:
             shapes[ids] = (mag, p)
             continue
-        keep, drop = (prev[1], p) if prev[0] >= mag else (p, prev[1])
+        if mag != prev[0]:
+            keep, drop = (prev[1], p) if prev[0] > mag else (p, prev[1])
+        else:
+            # Same effect, same size: who it lands on is the only thing left
+            # to choose by, so ask the focus rather than the list order.
+            keep, drop = ((p, prev[1])
+                          if _prefers_group(p.get("name") or "", solo)
+                             > _prefers_group(prev[1].get("name") or "", solo)
+                          else (prev[1], p))
         shapes[ids] = (max(prev[0], mag), keep)
         drop["_drop"] = True
         keep.setdefault("overwrites", []).append(drop.get("name"))
@@ -2121,17 +2219,53 @@ def _backfill_prebuffs(picks: list, ctx: dict) -> list:
         e = builds_data.spell_entry(sp["name"])
         if not e or (e.get("durationTicks") or 0) < 100:
             continue
-        pe = _primary_effect(e)
-        if not pe or pe[0] in _NOT_A_BUFF_SPAS:
+        if not _is_prebuff(e):
             continue
-        cands.append((abs(pe[1] or 0), sp))
-    cands.sort(key=lambda c: -c[0])
-    for _mag, sp in cands[:8]:
-        picks.append({"name": sp["name"], "cls": sp.get("cls") or "",
+        pe = _primary_effect(e)
+        if not pe:
+            continue
+        cands.append({"name": sp["name"], "cls": sp.get("cls") or "",
+                      "level": sp["level"], "_mag": abs(pe[1] or 0)})
+    # Same ordering trap as _long_buffs: the weaker half of a line would
+    # otherwise spend the slots its own upgrade needed.
+    cands, _sup = _gate_stacking(cands)
+    # Presentation order only. Magnitudes across DIFFERENT effects are not
+    # comparable -- "hit points 50" over "armor class 21" over "strength 5"
+    # ranks three unrelated numbers -- so this decides the order and must
+    # not decide membership. It used to cap at 8, which is how Holy Armor,
+    # Strength of Earth and Shield of Brambles went missing: small numbers,
+    # real buffs, nothing superseding them. Supersession above has already
+    # removed everything genuinely redundant, so what is left is offered.
+    cands.sort(key=lambda c: -c["_mag"])
+    for sp in cands[:16]:
+        picks.append({"name": sp["name"], "cls": sp["cls"],
                       "level": sp["level"],
                       "reason": (_buff_effects(sp["name"]) or "long buff")
                                 + " — worth re-casting between pulls"})
     return picks
+
+
+def _cap_prebuffs(picks: list, ctx: dict) -> list:
+    """A pre-buff routine has to fit in the spellbook too.
+
+    You cast these by memorizing one, casting it, and swapping the gem back,
+    so the list is bounded by the same gem count as the loadout. Seventeen
+    entries against a fourteen-slot book describes something the player
+    cannot actually do in one pass, and the overflow was silent.
+
+    PERMANENTS are kept first wherever they were proposed. They are cast
+    once and hold until death, so they earn their gem far more cheaply than
+    a buff re-cast between every pull -- if anything has to go, it is not
+    those.
+    """
+    slots = ctx.get("spell_slots") or 8
+    perm = {n.lower() for n in (ctx.get("_permanent") or [])}
+    keep = [p for p in picks if (p.get("name") or "").lower() in perm]
+    keep += [p for p in picks if (p.get("name") or "").lower() not in perm]
+    if len(keep) > slots:
+        logger.info("Pre-buffs trimmed to the %d spell slots (dropped %s)",
+                    slots, [p.get("name") for p in keep[slots:]])
+    return keep[:slots]
 
 
 def _describe_prebuffs(picks: list) -> list:
@@ -2238,9 +2372,9 @@ def _gate_prebuffs(picks: list) -> list:
         if not e:
             out.append(p)
             continue
-        pe = _primary_effect(e)
-        if pe and pe[0] in _NOT_A_BUFF_SPAS:
-            logger.info("Dropped prebuff (not a buff effect): %s", p.get("name"))
+        if not _is_prebuff(e):
+            logger.info("Dropped prebuff (lands on nobody you are buffing, "
+                        "or is not a buff effect): %s", p.get("name"))
             continue
         ticks = e.get("durationTicks") or 0
         if ticks > 0:

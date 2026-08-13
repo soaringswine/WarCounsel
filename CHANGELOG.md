@@ -44,6 +44,107 @@ a reload and a relaunch — that is what lets "why that pick?" span
 sessions — but there was no way to clear one, so a conversation from days
 ago greeted every launch and rode into every new answer as history.
 "clear thread" beside the ask box deletes it, for that character only.
+
+## v2.8.2 — 2026-08-12
+
+**New: a search line on the Quests tab.** You loot something and want to
+know whether it is quest fodder before you vendor it. Type the name. It
+matches item names, quest names, givers, zones, unlocks and rewards — so
+searching a zone answers "what can I finish while I am here" from the same
+box.
+
+Searching looks at every quest, not just the 25 the list shows, and lifts
+the cap while you type. A filter that only saw what was already on screen
+would miss matches silently.
+
+**An empty result now tells you which kind of empty it is.** Searching for
+something you are carrying that no quest wants used to return a blank list,
+which reads exactly like a broken search. It now says so by name: "You are
+carrying Tanned Split Paw Skin, and no quest page references it." Searching
+for something you do not have says that instead.
+
+It deliberately stops short of calling anything safe to sell. The wiki
+failing to tie an item to a quest is not evidence that nothing does.
+
+## v2.8.1 — 2026-08-12
+
+**Writing spell sets into the game folder is now OFF until you switch it
+on.** Settings ▸ General. If you use the Advisor's "save this as a spell
+set" button with `/memspellset`, turn it back on there — nothing else
+changed about how it works.
+
+Why: editing the `[SpellLoadouts]` section of your `LO*.ini` is the only
+thing this app writes inside the game folder, and it is the one place a
+strict reading of the Daybreak Terms of Service has anything to bite on.
+That should be your decision rather than the installer's. It is the same
+reasoning that has always kept `eqclient.ini` read-only — other companions
+flip `Log=1` for you; this one does not write a game file it was not asked
+to write.
+
+**Fixed: instanced zones at difficulty 1 or higher charted nothing.**
+Reported as issue #7 — standing in Plane of Hate D1 showed no map, no
+geometry, no route. Difficulty comes in two shapes and only one was
+handled: `Befallen 4 (Refined)` was recognised, `Plane of Hate D1` was not,
+so the zone resolved to nothing at all and the Atlas simply sat blank. This
+affects every zone at D1 and above, not just Hate.
+
+**Fixed: a saved settings checkbox could not be turned back off.** Settings
+overrides are stored as text, and the string `"false"` was being read as
+true — so the switch saved, the file on disk was correct, and the setting
+stayed on. Found while building the toggle above. The two places that
+applied overrides had each written the same logic separately, so the bug
+existed twice; there is now one.
+
+## v2.8.0 — 2026-08-12
+
+**Settings has a side-nav, and you choose what each panel shows.** A rail
+down the left — General, then one entry per panel, then the Overlay,
+Triggers, Screen reading and model blocks that were already there. Each
+panel entry lists its own sections as switches: turn off Deaths if you do
+not care about deaths, or Past sessions, or the whole War Ledger. Three
+presets to start from: Everything, Combat focus, Planning.
+
+Deliberately separate from the overlay's switchboard. A 42px strip and a
+340px column answer different questions — you want a damage meter and
+nothing else while fighting, and the full session ledger while planning —
+so one shared set of toggles would mean hiding deaths mid-fight also hides
+them when you sit down. Choices live in `data/`, which the updater
+preserves, so they survive both a restart and an upgrade.
+
+**Fixed: Ensnare and Treeform were being offered as pre-buffs.** Nothing
+checked who a spell lands on, so a snare — a 14-minute effect cast on an
+enemy — passed every test for something to cast before a pull. And nothing
+checked what the effect does, so Treeform qualified too: self-target, 36
+minutes, and it roots you in place.
+
+**Fixed: real buffs were missing from the pre-buff list.** Symbol of
+Transal, Strength of Earth, Holy Armor and Shield of Brambles never
+appeared. Three causes stacked: the candidate list was capped before
+supersession ran, so it kept Skin like Rock and Center and cut the Skin
+like Steel and Symbol of Transal that replace them; the stacking gate
+stopped at the first shared slot, so a spell occupying two slots resolved
+one conflict and left the other standing; and the deterministic backfill
+ranked by raw magnitude before cutting to eight, which drops small numbers
+that are nonetheless real buffs with nothing superseding them.
+
+**Fixed: a solo focus was handed the group version of its buffs.** Skin
+like Steel and Protection of Steel are the same 50 AC and 50 HP for the
+same 36 minutes, so the only difference is who else it lands on — and the
+tie was resolved by list order. It now asks your playstyle. Solo keeps the
+single-target twin; grouped keeps the group one.
+
+**Pre-buffs are capped at your spell slots.** You cast them by memorizing
+one, casting it and swapping the gem back, so a seventeen-entry routine
+against a fourteen-slot book describes something nobody can do in one pass.
+Permanents are kept first — cast once, held until death, so they earn a gem
+far more cheaply than anything re-cast between pulls.
+
+**New: a plain statement about third-party tools and the Daybreak Terms of
+Service**, in README.md and NOTICE.md. Game Jawn and Daybreak do not review
+or endorse any add-on, including this one. What the app reads, the one file
+it writes inside the game folder, and what leaves your machine are all
+itemised so you can weigh it yourself.
+
 ## v2.7.0 — 2026-08-10
 
 **New: a Quests tab.** Your inventory export says what you are carrying,

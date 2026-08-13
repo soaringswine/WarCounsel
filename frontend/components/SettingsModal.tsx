@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiSend } from "@/lib/api";
 import type { LlmProbe } from "@/lib/types";
 import { OcrSettings } from "./OcrSettings";
+import { PanelPresets, PanelSettings } from "./PanelSettings";
 import { OverlaySettings } from "./OverlaySettings";
 import { TriggerSettings } from "./TriggerSettings";
 
@@ -31,6 +32,7 @@ type GameVerdict = {
 };
 
 type SettingsData = {
+  allow_spellset_write?: boolean;
   game: GameVerdict;
   detected_game_dir: string | null;
   data_dir: string;
@@ -172,8 +174,26 @@ function effortFor(provider: string, llm: SettingsData["llm"]): string {
     : llm.claude_cli_effort;
 }
 
+/** Left-rail entries. Panels sit between the general settings and the
+ *  peripheral ones, because they are what people actually adjust. */
+const PANEL_TABS = [
+  { key: "vitals", label: "Vitals & Session" },
+  { key: "encounter", label: "Encounter" },
+  { key: "quests", label: "Quests" },
+  { key: "ledger", label: "War Ledger" },
+];
+const RAIL = [
+  { key: "general", label: "General" },
+  ...PANEL_TABS,
+  { key: "overlay", label: "Overlay" },
+  { key: "triggers", label: "Triggers" },
+  { key: "ocr", label: "Screen reading" },
+  { key: "llm", label: "Advisor model" },
+];
+
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<SettingsData | null>(null);
+  const [allowSetWrite, setAllowSetWrite] = useState(false);
   const [gameDir, setGameDir] = useState("");
   const [provider, setProvider] = useState("none");
   const [model, setModel] = useState("");
@@ -190,6 +210,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // ANOTHER machine, so it cannot be a fixed default.
   const [ollamaUrl, setOllamaUrl] = useState("");
   const [ctxLimit, setCtxLimit] = useState("");
+  const [tab, setTab] = useState("general");
   const [customUrl, setCustomUrl] = useState("");
   const [probe, setProbe] = useState<LlmProbe | null>(null);
   const [probing, setProbing] = useState(false);
@@ -215,6 +236,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         setOllamaUrl(d.llm.ollama_base_url ?? "");
         setCtxLimit(d.llm.context?.manual ?? "");
         setCustomUrl(d.llm.custom_base_url ?? "");
+        setAllowSetWrite(d.allow_spellset_write === true);
         setVerdict(d.game);
       })
       .catch((e) => setError(String(e)));
@@ -321,6 +343,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       // returns to following the server, which a conditional send could not
       // express.
       body.llm_context_limit = ctxLimit.trim();
+      // Sent as a string because app_config stores every override that way;
+      // "" would CLEAR the override rather than set it false, so both states
+      // are spelled out.
+      body.allow_spellset_write = allowSetWrite ? "true" : "false";
       // Only send a key when one was typed. Omitting it leaves whatever is
       // stored untouched — saving the game folder must never wipe a key.
       const field = keyFieldFor(provider);
@@ -381,8 +407,26 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         {!data && !error && <p className="chat-empty">Loading…</p>}
 
         {data && (
-          <div className="modal-body">
-            <section className="set-block">
+          <div className="modal-body set-split">
+            {/* A rail, because the modal had grown to six stacked blocks and
+                finding the overlay switches meant scrolling past the model
+                picker. Panels get their own entries so "stop showing me
+                deaths" has somewhere obvious to live. */}
+            <nav className="set-rail" aria-label="Settings sections">
+              {RAIL.map((r) => (
+                <button
+                  key={r.key}
+                  type="button"
+                  data-active={tab === r.key}
+                  onClick={() => setTab(r.key)}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </nav>
+            <div className="set-pane">
+            {tab === "general" && (
+<section className="set-block">
               <label htmlFor="set-game">Game folder</label>
               <div className="set-row">
                 <input
@@ -418,9 +462,30 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   {verdict.ok ? "✓" : "✕"} {verdict.reason}
                 </p>
               )}
-            </section>
 
-            <section className="set-block">
+              <label className="set-check" htmlFor="set-spellset-write">
+                <input
+                  id="set-spellset-write"
+                  type="checkbox"
+                  checked={allowSetWrite}
+                  onChange={(e) => setAllowSetWrite(e.target.checked)}
+                />
+                Write spell sets into the game folder
+              </label>
+              <p className="set-note">
+                Lets the Advisor save a suggested bar as an in-game spell set,
+                so <code>/memspellset</code> loads the whole thing at once. It
+                edits the <code>[SpellLoadouts]</code> section of your{" "}
+                <code>LO*.ini</code> and backs the file up first. This is the
+                only file WarCounsel writes inside the game folder, so it is
+                off until you switch it on — everything else it stores stays
+                in its own data folder.
+              </p>
+            </section>
+)}
+
+            {tab === "llm" && (
+<section className="set-block">
               <label htmlFor="set-provider">Advisor model</label>
               <select
                 id="set-provider"
@@ -734,8 +799,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 </>
               )}
             </section>
+)}
 
-            <section className="set-block">
+            {tab === "overlay" && (
+<section className="set-block">
               <label>Overlay</label>
               <p className="set-note">
                 Pick what the in-game overlay shows. The rest stays here in the
@@ -743,8 +810,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </p>
               <OverlaySettings />
             </section>
+)}
 
-            <section className="set-block">
+            {tab === "triggers" && (
+<section className="set-block">
               <label>Triggers</label>
               <p className="set-note">
                 Watch the log for the things you would otherwise miss — a
@@ -753,8 +822,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </p>
               <TriggerSettings />
             </section>
+)}
 
-            <section className="set-block">
+            {tab === "ocr" && (
+<section className="set-block">
               <label>Screen reading (OCR)</label>
               <p className="set-note">
                 Optional and Windows-only. The app reads two small boxes on your
@@ -762,8 +833,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </p>
               <OcrSettings />
             </section>
+)}
 
-            <section className="set-block">
+            {tab === "general" && (
+<section className="set-block">
               <p className="set-note">
                 Data folder: <code>{data.data_dir}</code>
                 <br />
@@ -771,9 +844,31 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 {data.packaged ? " (packaged build)" : ""}
               </p>
             </section>
+)}
 
             {error && <p className="set-note" data-ok="0">{error}</p>}
 
+            {PANEL_TABS.some((t) => t.key === tab) && (
+              <section className="set-block">
+                <label>{PANEL_TABS.find((t) => t.key === tab)!.label}</label>
+                <p className="set-note">
+                  Choose what this panel shows. Kept separate from the overlay:
+                  a glance strip and a full column want different things.
+                </p>
+                <PanelSettings active={tab} />
+              </section>
+            )}
+            {tab === "general" && (
+              <section className="set-block">
+                <label>Panel presets</label>
+                <p className="set-note">
+                  Starting points for every panel at once. Adjust individual
+                  panels from the list on the left.
+                </p>
+                <PanelPresets />
+              </section>
+            )}
+            </div>
             <div className="modal-foot">
               <button type="button" onClick={onClose} disabled={busy}>
                 Cancel
