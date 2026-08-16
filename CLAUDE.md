@@ -212,6 +212,27 @@ All styling is CSS custom properties in `app/globals.css` — **no Tailwind**.
   by Spirit Tap") — encounter heal rows key "Spell — Healer". Incoming
   avoidance parses per defense verb (block/dodge/parry/riposte/miss) into
   the per-fight defense line. Loot-and-auto-sell lines tag "(sold)".
+- **Whether damage was cast is decided PER EVENT, in a 12s window** —
+  `_cast_less()`, not "did the session ever see a cast". A name you both
+  cast AND proc collapses onto whichever came first under a set: Ignite,
+  granted by an owned Shimmering Ruby Stiletto and also scribed, was
+  hand-cast 532 times and fired cast-less 407 more in one log, and all 939
+  were reported as casts.
+  - 12s is MEASURED, not borrowed from the tool that suggested it: across
+    18,721 cast/damage pairs the gap is 2.0s median, 6.0s at p99, 99.8%
+    inside 12s, and the curve is FLAT to 30s — so a wider window buys
+    nothing and only risks calling a proc a cast.
+  - The old rule also demanded `spell_file.is_proc()`, which is False for
+    both Ignite and Burn: item-granted procs are not in the client spell
+    file at all (the known limit, one section down). The static answer said
+    "not a proc" while the log said otherwise 407 times.
+  - **Cast-less is NOT a general "this is a proc" test and must not become
+    one.** Smite is the counter-example: the Paladin ABILITY is a melee verb
+    whose rider `Smiting Strike` lands 6,608 times and is never cast, while
+    the Smite SPELL is cast 1,209 times. Cast-less says no cast caused it;
+    it says nothing about what did. Source claims stay with owned-stone
+    evidence — per jmoyers/everquest-companion's own note, "a proc line
+    never names its source", and every attribution there is co-occurrence.
 - Exaltation procs share the spell-damage line shape; effects granted by
   owned stones (wiki-mined into tracker.exalt_effects at startup/export
   refresh/character switch) label ability rows "(exaltation)" — MINUS any
@@ -459,6 +480,29 @@ source of truth the panel renders from), so there is one pattern to learn.
 - Combat-mode and slim-ledger rules address `.vitals-panel` / `.enc-panel`
   by CLASS. `> .panel:last-child` silently retargeted the ledger the moment
   the encounter panel was switched off.
+- **An item page's "Related quests" is a BACKLINK list, not a requirements
+  list.** It names a quest whether that quest TAKES the item, HANDS IT OUT,
+  or merely mentions it — so read straight it told a player their 78 water
+  flasks were the turn-in for five quests and that two more wanted a
+  Backpack. `_wanted_items()` checks each candidate against the QUEST's own
+  page: an item in the Reward block is what you get (Journeyman's Boots are
+  the reward of the Journeyman's Boots Quest, which the tab reported
+  backwards), prose says the same thing as "You receive a Water Flask", and
+  a page whose walkthrough never names the item is not asking for it.
+  - Ranks come off both sides first or "Ghoulbane +4" never matches the
+    "Ghoulbane" the prose names — that alone was dropping ten real turn-ins
+    in an early cut of this filter.
+  - **A curated turn-in row is never second-guessed**, and shows ONLY the
+    item the table names. Gnoll Bounty listed Water Flask and Ration beside
+    a bar counting GNOLL FANGS, because all three backlink to its page.
+  - The walkthrough half is a HEURISTIC and applies only when a walkthrough
+    exists. A page with none (Coldain Shawl #7, Zombie Flesh) keeps its
+    items — absence of prose is not evidence against, so the residue is
+    over-inclusive on purpose. Measured 2026-08-14: 56 rows to 36, with
+    every real turn-in surviving (Bone Chips, Phosphorous Powder, both halves
+    of the Thex Mallet, Ghoulbane for the Fiery Avenger).
+  - Changing what `_parse_quest` extracts means bumping the page cache key
+    (`"quest3"`), or stored entries come back without the new field.
 - **The Quests search matches over EVERY loaded row and lifts the 25-row
   cap** — a filter that only sees what is already on screen finds nothing
   and reads as broken. It covers item names, quest names, givers, zones,
@@ -787,6 +831,21 @@ display**; failing entries are dropped and logged, never shown. The gates
   one test all three paths share (`_long_buffs` for the prompt,
   `_backfill_prebuffs` for the deterministic additions, `_gate_prebuffs` for
   the verifier); before it, each checked a different subset.
+  - **`_is_prebuff()` is shared with the SPELL-SET WRITER** (`main.py`'s
+    `/api/spellsets/generate`), which kept its own list. The two disagreed
+    in BOTH directions: the writer dropped see-invisibility, which the
+    advisor kept, and it kept root and charm, which the advisor drops — so
+    `/memspellset` could write Treeform into a pre-buff bar and plant you in
+    the ground. One definition, both callers.
+  - Levitate (57) and see-invisibility (13) are excluded for the reason
+    invisibility already was: long, self-landing, structurally perfect
+    buffs that you cast to cross a zone or find something hiding, not as
+    part of buffing up. In a list bounded by your gem count they push out
+    something you would actually fight better for.
+  - Charisma (10) too — `_BUFF_NOISE` already declares it noise, so a spell
+    whose LEADING effect is charisma is one we can say nothing about. Spirit
+    of Snake rendered as "long buff" and nothing else, which is filler
+    wearing a recommendation.
   - `_BUFFABLE_TARGETS = {6, 41, 43, 51}` — self, single friendly, and the
     two group forms. Read off spells whose purpose is unambiguous (Stun,
     Fear and Ensnare are 5; Befriend Animal is 9; Feral Spirit is 14) rather
@@ -893,6 +952,38 @@ display**; failing entries are dropped and logged, never shown. The gates
   travel/summon/pet/FD/res SPAs) are listed in the prompt with a
   never-say-"refresh" instruction — Instrument of Nife-class buffs last
   until death.
+- **Cached counsel carries a CODE revision, and adding a gate means adding
+  its module to `_COUNSEL_SOURCES`.** Counsel persists to
+  `advice_cache.json` and the tab loads it with `?cached=1`, so freshness
+  used to be decided purely from character state and export timestamps —
+  nothing about the code that produced it. Installing a release that FIXED
+  an advisor gate therefore left the old counsel showing as current with
+  `stale: false`, and the fix could not correct output already on screen
+  (PR #8, soaringswine). Source builds hash every gate-holding module;
+  frozen builds use `APP_VERSION`, since PyInstaller does not guarantee
+  readable source. Hashing zero files falls back to `APP_VERSION` rather
+  than returning a constant, which would silently restore the bug.
+  - `advisor.py` alone is NOT enough: `scale_item_line`, `weapon_indices`,
+    `proc_rates`, `item_stat_vector` and the location gate live in
+    `game_data.py`, and the curated stacking lines in `spell_lines.py`.
+    `tests/test_counsel_revision_sources.py` parametrizes over the tuple, so
+    a new gate module gets covered the moment it is listed — and stays
+    uncovered, loudly, if it is not.
+- **A consult is discarded only when the MODEL BEHIND IT changed, and a
+  cleared memory cache is not a lost consult.** Two bugs, one report ("I did
+  a consult, clicked another tab, and it was gone"):
+  - `api_settings_set` cleared both caches whenever `llm_provider` appeared
+    in the body — and SettingsModal sends it on EVERY save. So saving a game
+    folder, or ticking a checkbox with nothing to do with the advisor, threw
+    away counsel the user had waited a minute for. It compares `active()`
+    before and after now.
+  - `?cached=1` fell straight to `{"cached": false}` when memory was empty,
+    while `data/advice_cache.json` still held the answer. That defeats the
+    whole persistence design — and PR #8's stale path, which exists so a
+    superseded consult stays VISIBLE rather than vanishing. Both consult
+    endpoints re-read the file before giving up.
+  - The disk copy is written per consult and survives reloads; verified by
+    forcing a reload and watching 17 advisor keys and 14 gear keys come back.
 - Deterministic extras: a vendor "purchase" list (near-level missing
   spells, buy-ahead marked), nice_to_have backfilled with owned
   non-superseded alternatives when the LLM lists few, and cached counsel
@@ -939,6 +1030,17 @@ display**; failing entries are dropped and logged, never shown. The gates
   persisted) is compared against the launch boundary; the snapshot carries
   `pet_inventory_stale`, the panel reads "Was holding (BETA)", and the sync
   hint is urgent.
+- **The Progression panel WITHHOLDS pre-launch data rather than labelling
+  it.** Flagging is the rule everywhere else, and this is the documented
+  exception. A beta achievements export on a real character claimed
+  "Primary Class Unlock - Monk — DONE, all six Sky items" while the current
+  export says Monk 0/6 and Paladin 4/4: not stale, a confident wrong answer
+  to "have I finished this", and a banner above the panel does not stop the
+  body of it asserting the claim. The banner carries a "show it anyway"
+  button; a reload re-blocks, because the reveal is per-look and not a
+  setting. Flagging has to be remembered on every surface and fails silently
+  where it was not — the achievements export sat 633 hours old with NO hint
+  at all until 2026-08-13, which is the argument for failing safe here.
 - **Pre-launch exports are flagged, not just aged.** `_pre_launch()` compares
   a file's mtime against `settings.eql_launch_iso` (2026-07-28). An export
   from beta is not merely stale: a character need not survive a launch, so
@@ -1694,7 +1796,7 @@ model selection itself is runtime-switchable in the UI.
 
 ## Releasing
 
-Latest: **v2.8.2**. MCP server clone at `MCP_SERVER_DIR` is
+Latest: **v2.9.1**. MCP server clone at `MCP_SERVER_DIR` is
 **ArtSabintsev/everquest-legends-mcp** — note a DIFFERENT project shares that
 name (Sergeantfirstclass...); it has no tags and no `src/data/eqlbuilds`, so
 builds_data.py finds nothing there. Local clone is on **v1.3.4**; **v1.3.5**

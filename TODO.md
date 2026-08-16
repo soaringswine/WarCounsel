@@ -77,19 +77,64 @@ Two specific unknowns:
 
 ---
 
-## Overlay on WebView2 instead of tkinter
+## Overlay on a webview instead of tkinter
 
-**Status:** deferred by the user, 2026-07.
+**Status:** deferred by the user, 2026-07. Rationale corrected 2026-08-13 —
+the entry previously argued itself backwards.
 
-Every Win32 mechanism the current overlay leans on has no macOS
-counterpart (click-through, Scroll Lock as the interact toggle, global
-hotkey polling, tray), and macOS will not reliably draw over a fullscreen
-Wine game regardless. A WebView2 overlay would also let it share the web
-UI's components instead of duplicating them in tkinter drawing calls.
+**The reason to do it is the SHARED UI, not Mac.** A webview overlay would
+draw in real HTML/CSS against the frontend's StoneGlass tokens and
+components instead of duplicating them in tkinter drawing calls, which is
+where the effort currently goes every time the overlay gains a section.
 
-Worth revisiting only if the overlay becomes a priority on Mac; the
-section/field switchboard already made the tkinter one considerably more
-useful.
+**The old entry said "worth revisiting only if the overlay becomes a
+priority on Mac", which is exactly backwards for WebView2** — it is
+Windows-only, so choosing it would convert "we do not ship a Mac overlay"
+from a policy into an architectural fact. If Mac ever matters, the target
+is **pywebview**, not WebView2: pywebview picks `edgechromium` (WebView2) on
+Windows, `cocoa` (WKWebView) on macOS and `gtk`/`qt` on Linux, and its
+`create_window` already takes `transparent`, `frameless` and `on_top`.
+
+**We already ship pywebview**, so this adds no runtime. It is not in
+`requirements-lite.txt` — `build_exe.bat` and the release workflow append it
+to the pip line — which is worth knowing because that file's own comment
+claims to decide what the exe can do.
+
+**The spike is DONE (2026-08-13): edgechromium honours it.** Measured in
+pixels rather than trusted from the API — baseline the desktop, put the
+window over it drawing one opaque box, compare. The desktop pixel under the
+transparent area came back byte-identical (delta 0) while the box rendered
+pure #ff0000, and `WS_EX_TOPMOST` was set. `transparent`, `frameless` and
+`on_top` all work together. Script kept at `scratchpad/spike2.py` shape —
+re-run it after any pywebview upgrade.
+
+Two things the spike also settled:
+
+- **Click-through is NOT provided.** The window came back with neither
+  `WS_EX_LAYERED` nor `WS_EX_TRANSPARENT`, so the Win32 ex-style dance stays
+  exactly as it is today — including the trap that rewriting the ex-style
+  drops the layer attributes and paints the window solid black. Port that
+  code across unchanged rather than rewriting it.
+- **DPI scaling is real and must be handled.** Asking for `x=300, y=300,
+  420x320` produced a window at `(450, 450)` sized `608x424` on a 150%
+  display. `data/overlay_ui.json` persists position and size, so a port that
+  ignores this will drift saved geometry on every launch.
+
+**The renderer is not what blocks Mac.** `backend/overlay.py` is about ten
+Win32 calls deep — `windll.user32` for the layered/transparent ex-styles and
+`SetLayeredWindowAttributes`, `GetAsyncKeyState` for hotkey polling,
+`GetKeyState(VK_SCROLL)` as the interact toggle, `CreateMutexW` for the
+singleton, `winsound`, and an `eqgame.exe` watch to self-close. A Mac
+overlay is a rewrite of the INTERACTION model whatever draws the pixels, and
+macOS still will not reliably draw over a fullscreen Wine game. Do not let
+"keeps Mac open" be the justification; several other things close it first.
+
+**Whatever is chosen, the process boundary stays.** `main.py` imports only
+`overlay_prefs`, never `overlay`, and the overlay launches through
+`child_command()`. That is why the server runs on Mac and Linux at all, and
+it is the one thing not to trade away for a nicer overlay — see the Electron
+comparison in "Adopting from everquest-companion", where their single
+process owning five overlay windows is precisely what this boundary forbids.
 
 ---
 
@@ -277,3 +322,202 @@ pets could fold into their owner properly.
 
 Worth checking whether such a list exists and what licence it carries
 before assuming it can be vendored.
+
+---
+
+## Adopting from everquest-companion (jmoyers)
+
+**Status:** compared 2026-08-13 against its README and feature site
+(<https://github.com/jmoyers/everquest-companion>,
+<https://jmoyers.github.io/everquest-companion/>). Source not read; claims
+below are from its own documentation, so verify before copying a mechanism.
+MIT-adjacent check needed before vendoring anything — see NOTICE.md rules.
+
+Same premise as ours: log file only, no memory reading, no injection. It is
+Electron/TypeScript, Windows-only, borderless mode required. So its wins are
+in PRESENTATION and RETENTION, not in access to better data — everything it
+draws, our parser already sees.
+
+### 1. Per-hit retention, and the two features it unlocks
+
+**The one architectural gap.** `state_tracker.apply()` folds every hit
+straight into counters (`abilities[name] = {hits, total, crits}`), so an
+encounter remembers totals and nothing else. `timeline` is 2s buckets of
+TOTAL damage — one lane, no attribution.
+
+They keep the individual events, which buys them two things we cannot
+currently build at any price:
+
+- **A fight timeline with one lane per skill**, marking hit / miss / resist
+  along the fight, with scroll-to-zoom, drag-to-pan and a Fit button.
+- **Per-hit drill-down**: click a fight, see every hit, miss and resist that
+  made the total.
+
+Cost is smaller than it sounds: a 4-minute fight at ~2 swings/sec is ~500
+events; cap per encounter and retain only for the encounters already held in
+memory. `PERSISTED_EVENTS` should NOT grow — this is in-memory per fight,
+dropped when the encounter rolls off, exactly like `timeline` today.
+
+Do this first. It is the only item that unblocks others, and "why did that
+fight go badly" is a question our Encounter panel currently cannot answer
+beyond totals.
+
+### 2. Zone-scoped "Overall" aggregate
+
+Theirs aggregates every fight in a zone to answer "is this ability worth
+casting" over a long session. Ours stops at `ability_summary()` — the last 5
+pulls — which is a different and much shorter question.
+
+Cheap for us: encounters already carry `zone` in the payload
+(`_persist_milestone`), so this is a rollup over stored rows, not new
+plumbing.
+
+**Belongs in the WEB panel, not the overlay.** The overlay dropped its
+last-5 aggregate deliberately (see CLAUDE.md, "The overlay meter is the
+CURRENT fight only") and that reasoning holds here — it is a planning
+question, and the overlay is a glance surface.
+
+### 3. Sort quests by closest to completion
+
+Their Plane of Sky tracker sorts class Test quests by nearest-to-done so you
+can see what is actually achievable. Trivial for us — the Quests tab already
+computes `have`/`needed` for rows where the count is known. Sort those
+first, descending by fraction complete, ahead of the rows with no bar.
+
+Smallest good idea on this list. No data work at all.
+
+### 4. Shareable trigger strings
+
+They share alerts as paste-safe strings that PREVIEW before importing, and
+export a whole config bundle that deliberately contains "no file paths, no
+window positions, and no character progress".
+
+We already have the hard half: `data/tracked_rules.json`, and
+`POST /api/tracked-rules` replaces the set whole. What is missing is
+encode/decode plus a preview step.
+
+Worth doing because a guild can standardise on one trigger set. It does NOT
+reopen the TTS decision (CLAUDE.md: voice callouts stay out, point people at
+eql-alerts) — sharing rules and speaking them are separate questions.
+
+Copy the exclusion list verbatim as a principle: a shared bundle must carry
+no paths, no window geometry, no character state.
+
+### 5. Named / raid-target kill history
+
+They track raid boss defeats across difficulty tiers with kill counts and
+dates. We have per-mob `kills/xp/coin_copper/loot_drops` and lifetime totals
+derived from `log_events`, but nothing distinguishes a named from a trash
+mob.
+
+**Do not guess at "named" from the mob's name.** No leading article, title
+case, apostrophes — every heuristic here is the fuzzy-matching trap the zone
+table exists to avoid.
+
+What IS evidence, and is new since 2026-08-12: we now parse the instance
+difficulty tier (`RE_DIFF_TIER`, "Plane of Hate D2"). Recording the tier on
+the kill gives a real axis without inventing one. A curated named list from
+the wiki would be the other honest route.
+
+### 6. Config bundle export
+
+Same shape as 4, one level up: overlay prefs, panel prefs, triggers, and the
+non-secret half of app_config. `secrets.json` must never be in it — that
+separation is the entire reason the file exists (CLAUDE.md, Settings &
+secrets).
+
+### Deliberately NOT adopting
+
+- **Voice packs / TTS.** Standing decision, unchanged.
+- **Recipe consumption in item knowledge.** We model no tradeskills at all,
+  and the data cost is high for a question our Quests tab does not ask.
+- **Telemetry, even off by default.** We collect nothing; that is a feature.
+  Their optional log scrubbing on feedback submission is a good idea IF a
+  "send your log" bug flow ever exists here. It does not.
+
+### Where we are ahead, and should not regress chasing this list
+
+Advisor and gear counsel with deterministic verification gates; the Quests
+tab across every item rather than one raid zone; the whole Atlas (charts,
+mined geometry, textured 3D, routing); buff timers — theirs is documented as
+"early, still rough" while ours does tier scaling, cooldown shaves and
+oracle-line snapping; the group-filtered meter built on the EQL
+shared-damage rule; session persistence across restarts; pet adoption and
+un-mapping; Mac and Linux under Wine against their Windows-only Electron;
+and a 43MB single .exe against an Electron runtime.
+
+---
+
+## More from everquest-companion, measured against a real log (2026-08-14)
+
+Follow-up to the adoption list above. Each item below was TESTED against
+1,755,201 lines of this project owner's logs rather than judged from their
+docs, so the numbers are what we would actually get, not what they get.
+
+Their proc analytics were the first thing taken from this survey and are
+already done (see the per-event cast window in state_tracker).
+
+### 1. Attack rounds — the one genuinely new measurement
+
+Their `attack-round-stats.md` groups swings per (second, target) and reads
+double/triple attack out of the round size. Our timestamps are second-
+granular, so this drops straight in. Measured:
+
+```
+rounds (second+target+verb)  86,808
+multi-swing rounds           13,140   15.1%
+swings per round             1:73,668  2:12,066  3:916  4:137  5:17  6:3
+```
+
+**Their caveat is the important part**: "same-second 2x on a WEAPON verb may
+be two hands, not a double". So the headline 15.1% conflates dual wield with
+double attack. The way through is to read it off verbs that cannot be dual
+wielded:
+
+```
+verb      rounds   multi%    dual-wieldable?
+kick      14,687    14.1%    no  <- clean double-attack read
+bash       4,132     7.3%    no  <- clean
+slash     22,096    16.6%    yes (contaminated)
+crush     15,644    22.4%    yes (contaminated)
+```
+
+Kick and bash are the honest signal. That is a real skill/AA effect a player
+would want to watch improve, and nothing in the app measures it today.
+
+### 2. Special-attack RATES, which we have the counts for but not the denominator
+
+We already parse and keep the stacked mods. Over the same logs: Riposte 557,
+Slay Undead 477, Finishing Blow 424, plus stacked forms (Riposte Critical
+40, Riposte Slay Undead 3). What we show is raw counts per ability; their
+doc normalises "flurry rate over primary attack rounds". Rounds from item 1
+ARE that denominator, so this comes almost free once rounds exist.
+
+### 3. Incoming attack profile
+
+What is actually hitting you, by the attacker's verb, over the same logs:
+punch 24,662 · hit 20,691 · bash 18,374 · kick 16,231 · slash 12,597 ·
+cleave 8,500 · pierce 7,548 · crush 4,040. We keep `damage_taken` and a
+last-5-pulls incoming profile; a session/lifetime breakdown of what is
+landing on you does not exist and needs no new parsing.
+
+### 4. Buff uptime — feasible, but NOT as simple as pairing cast to fade
+
+67 distinct spells faded across the logs. The trap is that fades mix three
+different things: our self-buffs, our debuffs on mobs, and mob debuffs on
+us. `tangling weeds` shows 62 fades against 0 casts by us, which is proof
+the set is not ours alone. Buff-fade lines carry a target (the mez/charm
+break signal), so the split is available — but it has to be done, not
+assumed, and the naive version would report uptime for spells the player
+never cast.
+
+### Not worth taking
+
+- **Proc SOURCE attribution** (`ProcLink`, concentration ratios,
+  `MIN_INACTIVE_SWINGS = 200`). Good work, and their instinct matches ours —
+  they refuse to call Instrument of Nife "exclusive" on 1,084 active hits vs
+  12 across 289 inactive swings because the control group is too small. But
+  it is a feature rather than a fix, and it claims a source the log never
+  names. Revisit only with a clear appetite for correlation-grade answers.
+- Anything requiring lockout state: the log carries none, see the raid
+  section above.

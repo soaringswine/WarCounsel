@@ -34,6 +34,7 @@ except ImportError:  # deterministic/lite build ships no langchain
 from backend.llm_runtime import active as llm_active, get_llm
 from backend import builds_data
 from backend.config import settings
+from backend.spellbook import RETRIEVABLE
 from backend.game_data import (build_wiki_context, hunting_candidates, is_resurrection,
                                is_travel_ritual, same_spell_line,
                                supersedes_for_slots)
@@ -417,7 +418,16 @@ _SELF_TARGET = 6
 # every structural test for a pre-buff passed -- and it plants you in the
 # ground. Befriend Animal and Charm Animals last 20 minutes and are cast on
 # something you intend to fight beside, not on yourself.
-_NOT_A_BUFF_SPAS = _NOT_PERM_SPAS | {67, 12, 28, 99, 22}
+# 57 is levitate and 13 is see-invisibility. Both are long, both land on
+# you, and both pass every structural test for a buff -- but you cast them
+# to cross a zone or to find something hiding, not as part of buffing up,
+# and in a list bounded by your gem count they push out something you would
+# actually fight better for. Same reasoning that already excluded
+# invisibility. 10 is charisma: the dataset marks it NOISE (see _BUFF_NOISE)
+# because zero-magnitude charisma pads almost every record, so a spell whose
+# LEADING effect is charisma is one we can say nothing about -- it rendered
+# as "long buff" and no more, which is filler wearing a recommendation.
+_NOT_A_BUFF_SPAS = _NOT_PERM_SPAS | {67, 12, 28, 99, 22, 57, 13, 10}
 
 # targetTypeId, read off spells whose purpose is unambiguous rather than
 # assumed from the id: 5 is an enemy (Stun, Fear, Lightning Bolt, Ensnare),
@@ -3195,7 +3205,7 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
         pet_now = {v.lower() for v in pet_inv.values()}
         pool = []
         for it in items:
-            if it.get("where") not in ("bags", "bank"):
+            if it.get("where") not in RETRIEVABLE:
                 continue
             nm = it["name"]
             if nm.lower() in pet_now or nm.lower() in exalt_hosts_p:
@@ -3394,9 +3404,11 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
                 continue
         if rec and (rec in owned or rec_base in owned_base):
             wset = where_by_base.get(rec_base, set())
-            s["where"] = ("bags" if "bags" in wset else
-                          "bank" if "bank" in wset else
-                          "worn" if "worn" in wset else None)
+            # Nearest to hand first, then the rest of the storage the parser
+            # can now name, then worn. Spelling out only bags and bank left an
+            # item in the Hoard or the Equipment tab reporting no location.
+            s["where"] = next((w for w in ("bags", "bank", "stash", "hoard",
+                                           "depot", "worn") if w in wset), None)
             slots.append(s)
         else:
             logger.info("Dropped gear recommendation not in inventory: %s",
@@ -3467,7 +3479,7 @@ async def generate_gear_advice(ctx: dict, reply_json: Optional[dict] = None,
         if low in pet_worn:
             continue  # already on the pet
         where = owned_locs.get(low)
-        if where not in ("bags", "bank") or low in exalt_hosts:
+        if where not in RETRIEVABLE or low in exalt_hosts:
             logger.info("Dropped pet-gear rec (not spare): %s (%s)", ph["item"], where)
             continue
         try:

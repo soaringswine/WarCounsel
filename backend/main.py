@@ -127,37 +127,6 @@ _last_state_broadcast = 0.0
 ADVICE_CACHE_FILE = data_path("advice_cache.json")
 
 
-def _advisor_code_rev() -> str:
-    """Cached counsel must not outlive the knowledge encoded in the
-    prompts. A briefing is frozen at consult time and the checks AND
-    revisions deliberately review against the STORED briefing — so a
-    prompt correction never reaches an already-cached consult, and a
-    disproven claim keeps cascading through the whole chain (live case:
-    the exalt slot-restriction overclaim resurfaced in a gear revision a
-    day after the prompts were fixed, because the cached gear briefing
-    still asserted it). Hashing the advisor source folds "the prompts or
-    gates changed" into the consult signature: the tab then shows the
-    stale banner and the next Consult regenerates the briefing. Frozen
-    builds may not ship readable source — APP_VERSION covers those,
-    changing once per release."""
-    try:
-        from backend.agent import advisor as _adv
-        return hashlib.sha1(
-            Path(_adv.__file__).read_bytes()).hexdigest()[:10]
-    except Exception:
-        return APP_VERSION
-
-
-_ADVISOR_REV = None  # computed on first use; APP_VERSION is defined below
-
-
-def _sig_rev() -> str:
-    global _ADVISOR_REV
-    if _ADVISOR_REV is None:
-        _ADVISOR_REV = _advisor_code_rev()
-    return _ADVISOR_REV
-
-
 def _sig_norm(sig: tuple) -> tuple:
     """Signatures survive a JSON roundtrip only as strings — normalize both
     sides of every comparison."""
@@ -635,9 +604,52 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.8.2"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.9.1"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+
+# Every module holding a prompt or a deterministic gate. advisor.py alone was
+# not enough: `scale_item_line`, `weapon_indices`, `proc_rates`,
+# `item_stat_vector` and the location gate live in game_data.py, and the
+# curated stacking lines in spell_lines.py -- so a fix to any of those left
+# the cache looking current, which is the same bug one file over. Packaged
+# builds never had the gap (APP_VERSION moves every release); this is for
+# source installs.
+_COUNSEL_SOURCES = ("backend.agent.advisor", "backend.game_data",
+                    "backend.spell_lines")
+
+
+def _advisor_code_revision() -> str:
+    """Revision of the prompts and deterministic gates used by counsel."""
+    if is_frozen():
+        return APP_VERSION
+    import importlib
+    h = hashlib.sha256()
+    seen = 0
+    for mod in _COUNSEL_SOURCES:
+        try:
+            f = importlib.import_module(mod).__file__
+            h.update(Path(f).read_bytes())
+            seen += 1
+        except (AttributeError, OSError, TypeError, ImportError):
+            continue
+    # Hashing NOTHING would hand every build the same constant and silently
+    # restore the bug, so fall back rather than return a hash of emptiness.
+    if not seen:
+        return APP_VERSION
+    return h.hexdigest()[:12]
+
+
+_ADVISOR_CODE_REV: Optional[str] = None
+
+
+def _advisor_revision() -> str:
+    global _ADVISOR_CODE_REV
+    if _ADVISOR_CODE_REV is None:
+        _ADVISOR_CODE_REV = _advisor_code_revision()
+    return _ADVISOR_CODE_REV
+
 
 app = FastAPI(title="WarCounsel", version=APP_VERSION, lifespan=lifespan)
 
@@ -940,8 +952,8 @@ async def generate_spellset(body: dict | None = None):
     One command in game then loads the whole bar: /memspellset <name>."""
     from backend import builds_data
     from backend.spellsets import find_loadout_ini, write_spell_set
-    from backend.agent.advisor import _permanent_buffs, stack_gem_order
-    from backend.game_data import _primary_effect as game_data_primary
+    from backend.agent.advisor import (_is_prebuff, _permanent_buffs,
+                                       stack_gem_order)
     from backend.game_data import supersedes_for_slots
     # Off unless the player switched it on. This is the only file the app
     # writes inside the game folder, so it is their call to make, not the
@@ -970,11 +982,14 @@ async def generate_spellset(body: dict | None = None):
             if tracker.level is not None and s["level"] > tracker.level:
                 continue
             e = builds_data.spell_entry(s["name"])
-            if not e or e.get("targetTypeId") not in (6, 51):
-                continue  # beneficial self/ally only — no charms, no enemy DoTs
-            pe = game_data_primary(e)
-            if pe and pe[0] in (12, 13, 28):
-                continue  # invisibility lines (incl. IVU): situational
+            # ONE definition of "is this a pre-buff", shared with the
+            # advisor. This used to keep its own list and the two disagreed
+            # in both directions: it dropped see-invisibility, which the
+            # advisor kept, and it kept root and charm, which the advisor
+            # drops -- so /memspellset could write Treeform into a pre-buff
+            # bar and plant you in the ground.
+            if not e or not _is_prebuff(e):
+                continue
             t = e.get("durationTicks") or 0
             if t > 0:  # any timed buff — longest first fills toward 14
                 timed.append((t, s["name"]))
@@ -1053,6 +1068,70 @@ async def generate_spellset(body: dict | None = None):
             "note": "The game reads this file at login — if the character "
                     "is logged in, camp to character select and back "
                     "before /memspellset (logging out overwrites the file)."}
+
+
+@app.get("/api/progression")
+async def get_progression():
+    """Achievement progress, read from the game's own /outputfile dump.
+
+    AUTHORITATIVE, and that is the point. Everyone else infers Plane of Sky
+    progress from an inventory dump, which is wrong in two directions: an
+    item already turned in has left your bags while its criterion stays
+    complete, and a class confirmed at creation autocompletes without the
+    items ever being held. The game answers per criterion; we read the
+    answer instead of guessing at it.
+
+    Sections come back in the file's own order with a `kind` tag so the UI
+    can lead with the interesting ones. Boilerplate criteria (the four
+    "autocompletes"/"can be bypassed" sentences) are flagged `note` by the
+    parser and excluded from `steps`, so a class unlock reads 6/6 and a
+    closest-to-done sort is not skewed by them.
+    """
+    d = load_export(tracker.name, tracker.server, "Achievements")
+    if not d:
+        return {"available": False, "sections": [],
+                "note": "No achievements export found — type "
+                        "/outputfile achievements in-game, then press "
+                        "check exports."}
+    # The file repeats itself: EverQuest: Keys and General: Keys are
+    # byte-identical. The parser already merges by name; this only decides
+    # what the UI leads with.
+    KIND = {"Untapped Potential: Classes": "class",
+            "Untapped Potential: Races": "race",
+            "Untapped Potential: Deity": "deity",
+            "EverQuest: Raids": "raid",
+            "EverQuest: Keys": "key", "General: Keys": "key",
+            "EverQuest: Progression": "faction",
+            "EverQuest: Exploration": "explore",
+            "EverQuest: Hunter": "hunter"}
+    # Grouped by KIND, not by the file's section names. Nine Tradeskill
+    # sections and four Slayer ones are one thing each to a player, and
+    # EverQuest: Keys / General: Keys are byte-identical duplicates -- so
+    # merging also has to dedupe by achievement name or Keys reads 0/8 when
+    # there are four keys in the game.
+    merged: dict = {}
+    order: list = []
+    for sec in d.get("sections") or []:
+        name = sec["section"]
+        kind = KIND.get(name,
+                        "tradeskill" if name.startswith("Tradeskill")
+                        else "slayer" if name.startswith("Slayer") else "other")
+        if kind not in merged:
+            merged[kind] = {"kind": kind, "section": name, "achievements": []}
+            order.append(kind)
+        seen = {a["name"] for a in merged[kind]["achievements"]}
+        merged[kind]["achievements"] += [a for a in sec["achievements"]
+                                         if a["name"] not in seen]
+    secs = []
+    for kind in order:
+        m = merged[kind]
+        m["total"] = len(m["achievements"])
+        m["done"] = sum(1 for a in m["achievements"] if a["done"])
+        secs.append(m)
+    return {"available": True, "sections": secs,
+            "done": d.get("done", 0), "count": d.get("count", 0),
+            "file": d.get("file"), "age_hours": d.get("age_hours"),
+            "pre_launch": d.get("pre_launch")}
 
 
 @app.get("/api/spellbook")
@@ -1677,7 +1756,14 @@ async def api_settings_set(body: dict):
             settings.eql_maps_custom_dir = str(game / "maps" / "Dark Brewall")
             clear_find_cache()
 
-    llm_touched = False
+    # SettingsModal sends the provider (and CLI effort fields) on every save.
+    # Snapshot what actually drives the current counsel so an unrelated save
+    # does not discard a consult, while a real active model/effort change does.
+    from backend.llm_runtime import effort_for, set_cli_prefs
+    active_before = active()
+    efforts_before = {
+        p: effort_for(p) for p in ("claude_cli", "codex_cli")
+    }
     if "llm_provider" in config_in:
         # Forward the model under the key THIS provider uses. Only openai
         # and custom were passed before, so for the others set_active saw
@@ -1691,21 +1777,26 @@ async def api_settings_set(body: dict):
                         "claude_cli": "claude_cli_model",
                         "codex_cli": "codex_cli_model"}
         set_active(prov, config_in.get(per_provider.get(prov, "")))
-        llm_touched = True
     # keep the runtime layer in step: llm_config wins over settings at use
     # time, so an effort saved here must also land there or a stale runtime
     # choice silently shadows it
-    from backend.llm_runtime import set_cli_prefs
     for cli_p in ("claude_cli", "codex_cli"):
         if f"{cli_p}_effort" in config_in:
             set_cli_prefs(cli_p, effort=str(config_in[f"{cli_p}_effort"]))
-            llm_touched = True
-    if llm_touched:
-        # effort rides the briefing the same way the model does, so a
-        # changed one invalidates a cached consult just as a switch does
+    active_after = active()
+    active_effort_changed = (
+        active_after["provider"] in efforts_before
+        and efforts_before[active_after["provider"]]
+        != effort_for(active_after["provider"])
+    )
+    if active_before != active_after or active_effort_changed:
+        # Effort rides the briefing the same way the model does, so a real
+        # active-provider effort change invalidates cached counsel too.
         global _advice_cache, _gear_cache
         _advice_cache = None
         _gear_cache = None
+        logger.info("Advisor runtime changed (%s -> %s) — consults cleared",
+                    active_before, active_after)
 
     restarted = False
     if game_changed:
@@ -1783,11 +1874,16 @@ async def get_advisor(refresh: bool = False, cached: bool = False):
            book["updated"] if book else None, tracker._last_aa_seen,
            inv_sig["updated"] if inv_sig else None,
            miss_sig["updated"] if miss_sig else None,
-           _sig_rev())
+           _advisor_revision())
     sig = _sig_norm(sig)
     if _advice_cache is not None and _advice_sig == sig and not refresh:
         return {**_advice_cache, "stale": False}
     if cached:
+        # Memory can be cleared while the persisted copy is intact (a
+        # provider switch or reload). Recover that copy before reporting that
+        # the consult disappeared; moved context still returns it as stale.
+        if _advice_cache is None:
+            _load_advice_cache()
         # serve the last counsel even when the context moved on (zone/level/
         # exports) — marked stale so the tab can offer a reconsult instead
         # of forcing one
@@ -1994,11 +2090,14 @@ async def get_gear(refresh: bool = False, cached: bool = False):
     sig = (tracker.class_str, tracker.level, tracker.race, tracker.pet_slots,
            tuple(sorted(tracker.pet_inventory.items())),
            inv["updated"] if inv else None,
-           _sig_rev())
+           _advisor_revision())
     sig = _sig_norm(sig)
     if _gear_cache is not None and _gear_sig == sig and not refresh:
         return {**_gear_cache, "stale": False}
     if cached:
+        if _gear_cache is None:
+            _load_advice_cache()   # one file holds both
+
         if _gear_cache is not None:
             return {**_gear_cache, "stale": True}
         return {"cached": False}

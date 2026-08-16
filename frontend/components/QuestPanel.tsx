@@ -138,7 +138,7 @@ export function QuestPanel({ level }: { level?: number | null }) {
   return (
     <section className="panel quest-panel">
       <div className="panel-head">
-        <h2>Quests</h2>
+        <h2 title="From your /outputfile inventory export joined to the wiki. Counts are what you hold; the required amount lives in each quest's walkthrough, so follow the link rather than trusting a number here. Class and level are shown but never used to hide a row — you will change trio and the items keep.">Quests</h2>
         <span className="atlas-zone">
           {scanned != null ? `${scanned} items scanned` : ""}
         </span>
@@ -171,12 +171,11 @@ export function QuestPanel({ level }: { level?: number | null }) {
           )}
         </div>
 
-        <p
-          className="adv-note"
-          title="From your /outputfile inventory export joined to the wiki. Counts are what you hold; the required amount lives in each quest's walkthrough, so follow the link rather than trusting a number here. Class and level are shown but never used to hide a row — you will change trio and the items keep."
-        >
-          Quests that want something you are already carrying.
-        </p>
+        {/* The explanatory note that used to sit here read as a second,
+            disabled input — same width and boxed treatment, directly under
+            the search — and its text repeated the tab name and the
+            placeholder. The rationale lives on the header tooltip, where it
+            is available without occupying the top of the panel. */}
 
         {err && <p className="set-note" data-ok="0">{err}</p>}
         {busy && !rows && <p className="adv-note">Reading item pages…</p>}
@@ -269,6 +268,7 @@ export function QuestPanel({ level }: { level?: number | null }) {
                 Showing one on some rows and not others is the honest
                 version of "we know this number and not that one". */}
             {q.needed != null && q.have != null && (
+              <div className="quest-bar-row">
               <div className="quest-progress" title={`${q.have} of ${q.needed}`}>
                 <div
                   className="quest-progress-fill"
@@ -280,23 +280,33 @@ export function QuestPanel({ level }: { level?: number | null }) {
                   {Math.floor((q.have / q.needed) * 100)}%
                 </span>
               </div>
+              {/* The requirement sits beside the bar that measures it. In the
+                  meta run it wore the same clothes as the giver, the zone and
+                  the rewards — four kinds of fact, one treatment. */}
+              <span className="quest-need" title={q.note ?? undefined}>
+                {q.needed} needed
+                {q.per_turnin ? `, ${q.per_turnin} per turn-in` : ""}
+              </span>
+              </div>
             )}
             <div className="quest-meta">
-              {q.needed != null && (
-                <span title={q.note ?? undefined}>
-                  {/* Counts from the vendored unlock table, which states them
-                      outright — unlike a walkthrough, where they are prose. */}
-                  {q.needed} needed
-                  {q.per_turnin ? `, ${q.per_turnin} per turn-in` : ""}
+              {/* Giver and zone are one fact — where you hand it in — so they
+                  read as one, with the place quieter than the person. */}
+              {(q.giver || q.zone) && (
+                <span className="quest-where">
+                  {q.giver}
+                  {q.giver && q.zone ? <span className="quest-zone"> · {q.zone}</span>
+                                     : q.zone}
                 </span>
               )}
-              {q.giver && <span>{q.giver}</span>}
-              {q.zone && <span>{q.zone}</span>}
               {q.classes && q.classes.toLowerCase() !== "all" && (
                 <span>{q.classes}</span>
               )}
               {q.rewards && q.rewards.length > 0 && (
-                <span className="quest-reward">{q.rewards.slice(0, 4).join(", ")}</span>
+                <span className="quest-reward">
+                  <span className="quest-reward-tag">rewards</span>
+                  {q.rewards.slice(0, 4).join(", ")}
+                </span>
               )}
             </div>
           </div>
