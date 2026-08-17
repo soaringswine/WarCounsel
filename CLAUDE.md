@@ -508,6 +508,39 @@ source of truth the panel renders from), so there is one pattern to learn.
   and reads as broken. It covers item names, quest names, givers, zones,
   unlocks and rewards, so the not-found message says exactly that rather
   than claiming it only searched your bags.
+- **`/api/item-acquisition` carries the BASE stat line as well.** "Is this
+  worth farming for" is the question a hover card is opened to answer, and
+  where an item drops cannot answer it — a Darkforge Vambrace reading
+  `Class: SHD` tells a Paladin/Monk/Shaman not to bother, which no
+  acquisition section would. Base (+0) deliberately: the card is usually
+  opened on something not owned, so there is no rank to scale to, and
+  `scale_item_line` must not be applied here.
+  - In the zone band the hover hangs off the QUEST name, not only the
+    reward. Most quest pages there parse to nothing so their `rewards` come
+    back empty, but an equipment quest is NAMED for what it pays and the
+    item page has the stats. `item_line("Weeping Wand Quest")` even
+    fuzzy-resolves to the wand.
+- **`GET /api/zone-items` reverses the quest lookup**: not "which quests want
+  this item I hold" but "which of the things I want drop HERE", so a zone
+  line turns into a short list of things not to vendor. Its OWN endpoint,
+  because the first call mines an item page per candidate and the
+  Progression tab reads a local file — blocking one on the other makes a
+  fast tab wait on the wiki.
+  - "Drops From" lines interleave zones and mob names with nothing marking
+    which is which ("Blackburrow, a burly gnoll, a gnoll brewer"). A name
+    that resolves through `_canonical()` IS a zone; everything else is a
+    mob. Same two-namespace bridge `zem_entry_for` exists for.
+  - **Plane of Sky items cannot be placed this way** — measured 2026-08-14,
+    0 of 20 sampled class-unlock criteria have a "Drops From" section at
+    all. Those come off named island bosses and the wiki records it
+    elsewhere. eqlposky/EQProgression DO carry it ("Island 5: The Spiroc
+    Lord") but state no licence, so nothing is vendored from them. Sky is
+    absent from this band on purpose.
+  - We can only want what we can already see: quest rows come from items you
+    HOLD, so a quest needing something you have none of is invisible. Race
+    unlocks are the exception — that table is curated, so all seven turn-ins
+    count regardless. 36 of 41 candidates resolved to a zone on a real
+    character.
 - **`GET /api/quests` returns the scanned item NAMES, not just the count**,
   because an empty search result has two very different causes: you are
   carrying the thing and no quest page wants it, or it is not in your bags.
@@ -1796,7 +1829,7 @@ model selection itself is runtime-switchable in the UI.
 
 ## Releasing
 
-Latest: **v2.9.1**. MCP server clone at `MCP_SERVER_DIR` is
+Latest: **v2.10.1**. MCP server clone at `MCP_SERVER_DIR` is
 **ArtSabintsev/everquest-legends-mcp** — note a DIFFERENT project shares that
 name (Sergeantfirstclass...); it has no tags and no `src/data/eqlbuilds`, so
 builds_data.py finds nothing there. Local clone is on **v1.3.4**; **v1.3.5**

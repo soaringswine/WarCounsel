@@ -243,19 +243,39 @@ class AAPoint(LogEvent):
     """Optionally carries the log's own running total ("You now have N
     ability points.") — authoritative for the unspent-points counter.
 
-    `count` is how many points this line granted: EQL awards them in batches
-    ("You have gained 2 ability point(s)!"), so assuming 1 undercounts."""
+    `count` is how many points this line granted. EQL can award a batch in
+    one message, so assuming one makes both the session and unspent counters
+    drift."""
     type: str = "aa"
     count: int = 1
     total: Optional[int] = None
 
 
 class AASpend(LogEvent):
-    """Points SPENT on an ability. `cost` is 0 for toggle AAs (Symphonic
-    Aura: Enabled), which re-enable free and are not purchases."""
+    """An ability purchase or rank improvement and its point cost."""
     type: str = "aa_spend"
     name: str
     cost: int
+
+
+class Consider(LogEvent):
+    """A /con result. EQL prints the mob's LEVEL outright — "(Lvl: 27)" —
+    which is objective where the verdict prose and the con colour are not,
+    and it is the only per-mob difficulty signal the log carries.
+
+    `rare` marks the "- a rare creature -" tag."""
+    type: str = "consider"
+    name: str
+    level: Optional[int] = None
+    rare: bool = False
+    verdict: Optional[str] = None
+
+
+class OutOfMana(LogEvent):
+    """"Insufficient Mana to cast this spell!" — a loss condition that leaves
+    no other trace. Running dry mid-fight is nearly as bad as dying and is
+    invisible to a death counter."""
+    type: str = "oom"
 
 
 class SkillUp(LogEvent):

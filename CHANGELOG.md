@@ -44,6 +44,86 @@ a reload and a relaunch — that is what lets "why that pick?" span
 sessions — but there was no way to clear one, so a conversation from days
 ago greeted every launch and rode into every new answer as history.
 "clear thread" beside the ask box deletes it, for that character only.
+## v2.10.1 — 2026-08-16
+
+**Fixed: the app could be using a max HP many levels out of date.** It was
+stored only when you typed one in — the stats-panel reading updated the live
+value but never wrote it back, while startup loaded the stored one. So every
+restart began with whatever you last typed and stayed there until you next
+opened the inventory window. On one character the stored value was 1948
+against an actual 3379.
+
+That was harmless until v2.10.0 started recording how far your health dropped
+in each fight. Measured against a stale maximum, a fight costing 1,900 damage
+reads as 2.5% health remaining instead of 44% — a comfortable fight logged as
+a near-death, in exactly the data meant to weigh survivability. The stored
+value now keeps up with what the app reads, and a value you type by hand still
+wins.
+
+## v2.10.0 — 2026-08-16
+
+**Fixed: gear advice could not see item effects at all.** A swap was offered
+as "+14 AC and no loss of other stats" — while quietly costing Spell Haste II,
+a 15% cast-time reduction. The stat vector has no term for an effect, so
+anything an item *does* was invisible to every comparison. Slot rows now name
+what a swap gives up.
+
+That took two wrong turns to get right, both corrected: an item's Effect line
+is its own and applies without a stone, and a socketed stone overrides it. The
+socket is exposed by **levelling** — across 23 worn items, all 20 at +1 or
+more had one and none of the 3 at +0 did — so a +0 item's focus cannot be
+moved at all, and the advice now says to merge the item first rather than just
+warning you.
+
+**Fixed: an item the wiki spells differently was invisible.** A Skull-shaped
+Barbute +3 was never offered for Head even though it strictly beats the worn
+helm (AC 17 vs 13, +46 HP, +13 SV Magic, nothing worse). Wiki titles are
+case-sensitive, the game writes Title Case, and the retry that should have
+caught it compared case-insensitively — so the item resolved to nothing and
+was silently excluded. An item with no stats never appears and nothing says
+why, which is the worst shape a bug can take here.
+
+**Fixed: spell sets saved in game could vanish.** The client keeps them in
+memory and rewrites the file wholesale when it flushes, so writing while it
+runs loses data in both directions. Writing is now refused during a session,
+with the remedy named: camp to desktop first.
+
+**Fixed: the AA counter never went down.** Purchases were not parsed at all
+and batched awards were missed — 199 spent points unaccounted across 128
+purchases in one log. Thanks to @soaringswine for the fix and the regression
+tests. (#11)
+
+**Fixed: ranged items were never compared.** The Range row said "not compared"
+because bows and thrown are outside the white-DPS index — but only their
+*damage* is. Stats compare like anything else, and now do, with only the
+damage half disclaimed.
+
+**Fixed: coordinates split across OCR boxes.** An X of 1540 could read as 1.
+
+**New: deterministic passes run before the model.** Spell candidates are
+pre-gated so a loadout slot cannot be spent on a pick that gets dropped
+afterwards (91 → 56 on a real spellbook). The wiki context is fitted per
+section instead of truncated at the tail — that tail was the AA list, and at
+the production budget **0 of 73 AA entries** were reaching the model while it
+was asked to recommend AAs "using the per-rank costs in the data". Now 26.
+
+**New: pet gear is compared, not guessed.** A deterministic pass does the
+arithmetic first and hands the model the trade-offs. Clear upgrades fill in
+automatically; genuine trade-offs deliberately do not, because choosing
+between +6 damage and −10 strength is a judgement call. Its candidate pool was
+also ranked alphabetically and cut at 40, hiding 20 items — including the
+highest-damage weapon owned.
+
+**New: encounters record how close the fight was.** A death is the tail of a
+distribution: 2.6% of fights ended in one, while 5.3% cost over half of max HP
+and 8.5% ran past 90 seconds. Each fight now carries the deepest HP reached,
+whether mana ran out, and the mob's level from `/con` — groundwork for
+weighting gear by what actually threatens you rather than by what killed you.
+
+Also fixed along the way: healing received counted **zero**. Every heal landing
+on you is logged as "you" rather than by name, and the check only matched the
+name — 17,954 hp unaccounted in a single log.
+
 ## v2.9.1 — 2026-08-14
 
 **Fixed: a consult could disappear when you saved settings.** Run a consult,

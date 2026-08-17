@@ -383,6 +383,14 @@ async def on_log_event(event: ev.LogEvent, live: bool) -> None:
                 "zone": tracker.zone, "level": tracker.level,
                 "class_str": tracker.class_str,
                 "aa_available": tracker.aa_available,
+                # A max_hp learned from the stats panel lived only in
+                # memory: the row was written when the player TYPED a
+                # value and never again, so a restart reloaded the typed
+                # number and ran on it until the panel was next read.
+                # Harmless while nothing depended on it -- hp_floor_pct
+                # now does, and a floor measured against a stale max
+                # reports a comfortable fight as a near-death.
+                "max_hp": tracker.max_hp, "max_mana": tracker.max_mana,
             })
         except asyncio.QueueFull:
             logger.warning("DB queue full — dropping %s milestone", event.type)
@@ -418,6 +426,12 @@ def _persist_milestone(item: dict) -> None:
                 row.aa_available = item["aa_available"]
             if item["class_str"]:
                 row.class_str = item["class_str"]
+            # a typed value still wins in the TRACKER, so this can
+            # never overwrite a deliberate statement with a reading
+            for f in ("max_hp", "max_mana"):
+                v = item.get(f)
+                if v and v > 0 and getattr(row, f, None) != v:
+                    setattr(row, f, v)
         db.commit()
     finally:
         db.close()
@@ -488,6 +502,8 @@ def _drain_finished_sessions() -> None:
                 "zone": view.get("zone"), "level": view.get("level"),
                 "class_str": view.get("class_str"),
                 "aa_available": tracker.aa_available,
+                "max_hp": tracker.max_hp,
+                "max_mana": tracker.max_mana,
             })
         except asyncio.QueueFull:
             logger.warning("DB queue full — dropping session record")
@@ -509,6 +525,14 @@ def _drain_finished_encounters() -> None:
                 "zone": tracker.zone, "level": tracker.level,
                 "class_str": tracker.class_str,
                 "aa_available": tracker.aa_available,
+                # A max_hp learned from the stats panel lived only in
+                # memory: the row was written when the player TYPED a
+                # value and never again, so a restart reloaded the typed
+                # number and ran on it until the panel was next read.
+                # Harmless while nothing depended on it -- hp_floor_pct
+                # now does, and a floor measured against a stale max
+                # reports a comfortable fight as a near-death.
+                "max_hp": tracker.max_hp, "max_mana": tracker.max_mana,
             })
         except asyncio.QueueFull:
             logger.warning("DB queue full — dropping encounter record")
@@ -604,7 +628,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.9.1"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.10.1"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -951,7 +975,8 @@ async def generate_spellset(body: dict | None = None):
     """Write the advisor's Memorize-now list as an in-game spell set.
     One command in game then loads the whole bar: /memspellset <name>."""
     from backend import builds_data
-    from backend.spellsets import find_loadout_ini, write_spell_set
+    from backend.spellsets import (find_loadout_ini, write_spell_set,
+                                   GameRunning)
     from backend.agent.advisor import (_is_prebuff, _permanent_buffs,
                                        stack_gem_order)
     from backend.game_data import supersedes_for_slots
@@ -1061,13 +1086,49 @@ async def generate_spellset(body: dict | None = None):
                                  "(eqlbuilds snapshot missing?)")
     try:
         result = await asyncio.to_thread(write_spell_set, path, name, ids)
+    except GameRunning as e:
+        # 409, not 500: nothing is broken, the timing is simply wrong. This
+        # used to be a NOTE in the response telling the player that logging
+        # out overwrites the file -- advice they had to read and act on,
+        # which is not a guard. Sets saved in game were being lost until the
+        # player switched the whole feature off to stop it.
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(500, str(e))
     return {**result, "written": written, "skipped": skipped,
             "memspellset": f"/memspellset {name}",
-            "note": "The game reads this file at login — if the character "
-                    "is logged in, camp to character select and back "
-                    "before /memspellset (logging out overwrites the file)."}
+            "note": "Written while the game was closed, so it will be there "
+                    f"at login. In game: /memspellset {name}"}
+
+
+@app.get("/api/zone-items")
+async def get_zone_items():
+    """Wanted items that drop in the zone you are standing in.
+
+    Its own endpoint rather than part of /api/progression: the first call
+    mines an item page per candidate, and the Progression tab reads a local
+    file and should not wait on the wiki to render.
+    """
+    from backend import zone_items as zi
+    from backend import quests as quests_mod
+    inv = load_export(tracker.name, tracker.server, "Inventory")
+    items = (inv or {}).get("items") or []
+    held: dict = {}
+    for it in items:
+        n = (it.get("name") or "").strip()
+        if n:
+            held[n] = held.get(n, 0) + int(it.get("count") or 1)
+    rows = []
+    if items:
+        try:
+            rows = await quests_mod.quests_for_items(items, level=tracker.level)
+        except Exception:
+            logger.debug("zone-items: quest scan failed", exc_info=True)
+    try:
+        return await zi.worth_collecting(tracker.zone, rows, held)
+    except Exception as exc:
+        logger.exception("zone-items failed")
+        raise HTTPException(500, f"zone lookup failed: {str(exc)[:120]}")
 
 
 @app.get("/api/progression")
@@ -2526,9 +2587,16 @@ async def get_loot_filter():
 @app.get("/api/item-acquisition")
 async def get_item_acquisition(name: str):
     """Where an item comes from (drops/vendors/quests/crafting) — feeds
-    the gear-tab hover cards. Wiki-mined, cached."""
-    from backend.game_data import item_acquisition
-    return await item_acquisition(name)
+    the gear-tab hover cards. Wiki-mined, cached.
+
+    Carries the BASE stat line too. "Is this reward worth farming for" is
+    the question a hover card is opened to answer, and acquisition alone
+    cannot answer it. Base (+0) values deliberately: the card is most often
+    opened on something not owned yet, and there is no rank to scale to.
+    """
+    from backend.game_data import item_acquisition, item_line
+    acq, line = await asyncio.gather(item_acquisition(name), item_line(name))
+    return {**(acq or {}), "stats": line or None}
 
 
 @app.get("/api/map")

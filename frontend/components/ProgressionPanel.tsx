@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet } from "@/lib/api";
 import { usePanelPrefs } from "@/lib/panelPrefs";
+import { ItemHover } from "./ItemHover";
 
 /* What the game says you have and have not done.
  *
@@ -24,6 +25,14 @@ interface Achievement {
   steps: number;
   steps_done: number;
   criteria: Criterion[];
+}
+interface ZoneItem {
+  name: string;
+  for: string[];
+  held: number;
+  needed: number | null;
+  also_drops: string[];
+  rewards: string[];
 }
 interface Section {
   section: string;
@@ -85,6 +94,11 @@ export function ProgressionPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [openRow, setOpenRow] = useState<Record<string, boolean>>({});
+  // Its own fetch: the first call mines an item page per candidate, and the
+  // rest of this panel reads a local file. Blocking one on the other would
+  // make a fast tab wait on the wiki.
+  const [zoneItems, setZoneItems] = useState<
+    { zone: string | null; items: ZoneItem[] } | null>(null);
   // Pre-launch data is WITHHELD, not merely labelled. A beta export on this
   // character claimed "Primary Class Unlock - Monk — DONE, all six Sky items"
   // while the real one says Monk 0/6 and Paladin 4/4. That is not stale, it
@@ -116,6 +130,14 @@ export function ProgressionPanel() {
     }
   }, []);
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    let alive = true;
+    apiGet<{ zone: string | null; items: ZoneItem[] }>("/api/zone-items")
+      .then((d) => alive && setZoneItems(d))
+      .catch(() => alive && setZoneItems(null));
+    return () => { alive = false; };
+  }, []);
 
   if (err) return <section className="panel"><div className="panel-body">
     <p className="set-note" data-ok="0">{err}</p></div></section>;
@@ -159,6 +181,60 @@ export function ProgressionPanel() {
                 show it anyway
               </button>
             )}
+          </div>
+        )}
+
+        {/* Where you are STANDING, ahead of everything you are working
+            toward — it is the only part of this panel that expires. */}
+        {zoneItems && zoneItems.items.length > 0 && (
+          <div className="prog-sec prog-here">
+            <div className="prog-head" aria-hidden>
+              <span className="prog-caret">◈</span>
+              Worth collecting in {zoneItems.zone}
+              <span className="prog-count">{zoneItems.items.length}</span>
+            </div>
+            {zoneItems.items.map((z) => (
+              <div className="prog-row" key={z.name}>
+                <div className="prog-name">
+                  {z.name}
+                  <span className="prog-frac">
+                    {z.needed != null ? `${z.held} / ${z.needed}` : `have ${z.held}`}
+                  </span>
+                </div>
+                <ul className="prog-crit">
+                  <li>
+                    <span className="prog-tick">→</span>
+                    {/* Hover the quest, not just the reward: most quest
+                        pages here parse to nothing, so their `rewards` come
+                        back empty — but an equipment quest is NAMED for
+                        what it pays, and the item page has the stats. */}
+                    {z.for.map((q, i) => (
+                      <span key={q}>
+                        {i > 0 && " · "}
+                        <ItemHover name={q} />
+                      </span>
+                    ))}
+                    {z.also_drops.length > 0 && (
+                      <span className="prog-also"> · also {z.also_drops.join(", ")}</span>
+                    )}
+                  </li>
+                  {/* The REWARD is what decides whether this is worth the
+                      bag slot, and the quest's name only coincides with it
+                      for equipment quests. Hover for the base stats. */}
+                  {z.rewards.length > 0 && (
+                    <li className="prog-rewards">
+                      <span className="prog-tick">★</span>
+                      {z.rewards.map((r, i) => (
+                        <span key={r}>
+                          {i > 0 && ", "}
+                          <ItemHover name={r} />
+                        </span>
+                      ))}
+                    </li>
+                  )}
+                </ul>
+              </div>
+            ))}
           </div>
         )}
 
