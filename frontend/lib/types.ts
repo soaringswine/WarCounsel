@@ -366,6 +366,14 @@ export interface GearSlot {
   recommend: string | null;
   why: string;
   where?: string | null;
+  weighted?: {
+    profile: string;
+    current_score: number;
+    candidate_score: number;
+    delta: number;
+    why: { key: string; delta: number }[];
+    cap_adjusted?: boolean;
+  };
 }
 
 export interface GearFarm {
@@ -438,6 +446,13 @@ export interface GearMerge {
   filter_action?: string | null;
 }
 
+export interface GearSurplus {
+  name: string;
+  where?: string | null;
+  why: string;
+  action: string;
+}
+
 export interface GearAdvice {
   /** Owned items with an activatable effect — deterministic, never LLM. */
   clickies?: {
@@ -465,6 +480,8 @@ export interface GearAdvice {
   };
   /** which provider/model was configured when this was produced */
   llm?: { provider: string; model: string };
+  /** Owned items that will not be worn again, whatever you level next. */
+  surplus?: GearSurplus[];
   source: "llm" | "builtin";
   generated: string;
   note: string | null;

@@ -158,6 +158,18 @@ def _pet_unlock_level(name: str) -> Optional[int]:
 # ("Summon Drink supersedes Hammer of Striking" was a real bug: both are
 # SPA 32 and the summoned item id compared as if it were power).
 NONCOMPARABLE_SPAS = {32, 33, 85, 113}
+# Secondary ailment counters identify damage families that share the same
+# primary HP effect but resist independently.  Comparing only the strongest
+# HP effect made Venom of the Snake (poison) look like an upgrade to Scourge
+# (disease), so the advisor silently removed the disease DoT from its prompt.
+AILMENT_COUNTER_SPAS = {35, 36, 116}  # disease, poison, curse
+
+
+def _ailment_signature(rec: dict) -> frozenset:
+    return frozenset(
+        e.get("effectId") for e in (rec.get("effects") or [])
+        if e.get("effectId") in AILMENT_COUNTER_SPAS
+    )
 
 
 async def is_resurrection(name: str) -> bool:
@@ -208,10 +220,10 @@ def _primary_effect(rec: dict):
 
 async def same_spell_line(using: str, upgrade: str) -> bool:
     """True only when `upgrade` plausibly supersedes `using`: both are real
-    spells doing the SAME JOB (same primary effect id and direction, same
-    target type) with the upgrade hitting harder. Kills hallucinated pairs
-    like a teleport 'upgrading' to a nuke — an LLM judgment this codebase
-    no longer trusts unverified."""
+    spells doing the SAME JOB (same primary effect id and direction, target
+    type, and ailment family) with the upgrade hitting harder. Kills
+    hallucinated pairs like a teleport 'upgrading' to a nuke — an LLM
+    judgment this codebase no longer trusts unverified."""
     ra = await spell_record(using)
     rb = await spell_record(upgrade)
     if not ra or not rb:
@@ -221,6 +233,10 @@ async def same_spell_line(using: str, upgrade: str) -> bool:
     if _is_pet(ra) and _is_pet(rb):
         la, lb = _pet_unlock_level(using), _pet_unlock_level(upgrade)
         return la is not None and lb is not None and lb > la
+    ailments_a = _ailment_signature(ra)
+    ailments_b = _ailment_signature(rb)
+    if (ailments_a or ailments_b) and ailments_a != ailments_b:
+        return False
     pa = _primary_effect(ra)
     pb = _primary_effect(rb)
     if not pa or not pb:
@@ -683,9 +699,11 @@ async def item_line(name: str) -> Optional[str]:
     if ov:
         return ov[0]
     key = base.lower()
+    from backend.eqlbis import catalog_item_line
+    catalog_line = catalog_item_line(base)
     cached = wiki_page_cache.get("item_line2", key)
     if cached is not None:
-        return cached or _supplied_line(base)
+        return cached or catalog_line or _supplied_line(base)
     page = await get_mcp_client().wiki_page(base, max_characters=4000)
     if page is None:
         # exact title missed — fuzzy-resolve (punctuation/case drift
@@ -694,7 +712,15 @@ async def item_line(name: str) -> Optional[str]:
             alt = await _resolve_item_title(base)
         except Exception:
             alt = None
-        if alt and alt.lower() != base.lower():
+        # Compare EXACTLY, not case-folded. MediaWiki titles are
+        # case-sensitive past the first letter, so "Skull-Shaped Barbute"
+        # (the game's Title Case) and "Skull-shaped Barbute" (the wiki's
+        # sentence case) are different pages -- but a case-folded guard
+        # calls them identical and skips the retry, so the item resolves to
+        # nothing and silently becomes STATS UNKNOWN. Reported live: a
+        # Skull-shaped Barbute +3 was never offered for the Head slot even
+        # though the page exists with AC 13, HP +35, SV MAGIC +10.
+        if alt and alt != base:
             page = await get_mcp_client().wiki_page(alt, max_characters=4000)
     if page is None:
         # no page OR wiki down — indistinguishable here. Serve the last
@@ -705,10 +731,10 @@ async def item_line(name: str) -> Optional[str]:
         if stale:
             return stale
         wiki_page_cache.set("", 3600, "item_line2", key)
-        return _supplied_line(base)
+        return catalog_line or _supplied_line(base)
     line = _compact_item(page.get("text", ""))
     wiki_page_cache.set(line or "", WIKI_TTL, "item_line2", key)
-    return line or _supplied_line(base)
+    return line or catalog_line or _supplied_line(base)
 
 
 def _supplied_line(base: str) -> Optional[str]:
@@ -824,12 +850,25 @@ async def item_acquisition(name: str) -> dict:
     cached = wiki_page_cache.get("item_acq1", key)
     if cached is not None:
         return cached
-    from backend.wiki_http import fetch_page_html
-    html = await fetch_page_html(base)
+    from backend.wiki_http import WikiUnavailable, fetch_page_html
+    try:
+        html = await fetch_page_html(base)
+    except WikiUnavailable:
+        # The wiki is DOWN, not silent about this item. Serve whatever we
+        # last knew and cache NOTHING -- writing a miss here is what turned
+        # one outage into an hour of empty results after it had passed.
+        stale = wiki_page_cache.get_stale("item_acq1", key)
+        return stale if stale is not None else {
+            "item": base, "sections": [], "available": False, "offline": True}
     if html is None:
         stale = wiki_page_cache.get_stale("item_acq1", key)
-        if stale is not None:
+        if stale is not None and stale.get("available"):
             return stale
+        from backend.eqlbis import catalog_acquisition
+        catalog = catalog_acquisition(base)
+        if catalog and catalog["available"]:
+            wiki_page_cache.set(catalog, WIKI_TTL, "item_acq1", key)
+            return catalog
         miss = {"item": base, "sections": [], "available": False}
         wiki_page_cache.set(miss, 3600, "item_acq1", key)
         return miss
@@ -842,6 +881,11 @@ async def item_acquisition(name: str) -> dict:
         # keep sections with real content; solitary boilerplate is noise
         if rows and not all(r["kind"] == "note" for r in rows):
             sections.append({"label": label, "lines": rows})
+    if not sections:
+        from backend.eqlbis import catalog_acquisition
+        catalog = catalog_acquisition(base)
+        if catalog and catalog["available"]:
+            sections = catalog["sections"]
     out = {"item": base, "sections": sections, "available": bool(sections)}
     wiki_page_cache.set(out, WIKI_TTL, "item_acq1", key)
     return out
@@ -865,9 +909,15 @@ def guide_budget() -> int:
     3200 was chosen to protect a model loaded at 8k. That is the floor,
     not the norm: a local server reports its LOADED window and 32k is
     common, where holding guides to 3200 discards most of what we could
-    say. Cloud providers stay at the floor deliberately -- their context
+    say. METERED cloud APIs stay at the floor deliberately -- their context
     is ample but their tokens are billed, and nobody asked us to spend
     four times as much per consult.
+
+    A CLI provider is neither. `claude_cli`/`codex_cli` shell out to a
+    subscription CLI: the window is hundreds of thousands of tokens and no
+    consult is billed per token, so the floor was rationing against a cost
+    that does not exist -- an Opus-class model was reading class guides
+    truncated for an 8k llama. They get the ceiling.
 
     Scales with the window rather than jumping, and stops at 9000: past
     that the guides would crowd out the gear and spell context they are
@@ -875,11 +925,18 @@ def guide_budget() -> int:
     prompt measured ~3.9s locally).
     """
     try:
-        from backend.llm_runtime import context_limit
+        from backend.llm_runtime import active, context_limit
         info = context_limit()
     except Exception:
         return 3200
     if info["source"] == "default":
+        # Not "manual": a player who pins a number is describing a window,
+        # and that pin outranks the provider's own generosity below.
+        try:
+            if active()["provider"] in ("claude_cli", "codex_cli"):
+                return 9000
+        except Exception:
+            pass
         return 3200
     return max(3200, min(9000, int(info["limit"] * 0.18)))
 
@@ -1163,7 +1220,12 @@ async def spell_vendors(spell: str) -> list:
                 rows.append({"zone": zone, "vendor": vendor,
                              "where": where, "loc": loc})
     except Exception:
+        # Do NOT fall through to the cache write below. Caching an empty
+        # result after a failure keeps the failure alive for the full TTL
+        # long after the wiki has recovered -- the same trap item
+        # acquisition fell into, one line further down.
         logger.exception("spell_vendors(%s) failed", spell)
+        return wiki_page_cache.get_stale("spell_vendors", key) or []
     wiki_page_cache.set(rows, WIKI_TTL, "spell_vendors", key)
     return rows
 
@@ -1219,6 +1281,36 @@ async def zem_zone_levels() -> dict:
         return _vendored_zem()
     wiki_page_cache.set(zones, WIKI_TTL, "zem_levels_wt2")
     return zones
+
+
+async def zem_entry_for(zone_name: str) -> Optional[tuple]:
+    """The sheet's row for a zone named in ANY of our spellings.
+
+    The bridge between two name spaces that never met. The ZEM table keys on
+    WIKI names ("The Hole", "Mistmoore Castle", "Western Karana"); the log,
+    the tracker and map_system key on the game's ("Ruins of Old Paineel",
+    "Castle Mistmoore", "West Karana"). Comparing the strings answered "not
+    in the sheet" for zones sitting right there in it — so both sides are
+    reduced to a canonical key first, the same trick /api/trio-compare uses
+    for class_str, where two orderings of one real loadout were splitting
+    into rows that could not be compared.
+
+    Returns (display name as the sheet spells it, row) or None. The sheet's
+    spelling is handed back rather than swallowed: it is what the user will
+    see quoted on the wiki, and rewriting it would hide where the data came
+    from.
+    """
+    key = _canonical(zone_name)
+    table = await zem_zone_levels()
+    for zname, z in table.items():
+        if zname.lower() == (zone_name or "").lower():
+            return zname, z
+    if key is None:
+        return None
+    for zname, z in table.items():
+        if _canonical(zname) == key:
+            return zname, z
+    return None
 
 
 def _zone_band(z: dict) -> tuple:
@@ -1282,6 +1374,12 @@ async def hunting_candidates(level: int) -> list:
         marked = sorted(l for l, t in tiers.items() if t in ("efficient", "ok"))
         out.append({
             "zone": zone,
+            # The map/log spelling of the same zone, so a caller can route
+            # to a pick, or tell that a pick IS where the player already is,
+            # without re-deriving it. None when the sheet names a zone we
+            # cannot place -- honest, and visible, rather than a name that
+            # silently resolves to nothing downstream.
+            "key": _canonical(zone),
             "band": f"{lo}-{hi or lo}",
             "at_level": quality != "stretch",
             "quality": quality,

@@ -1842,7 +1842,22 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                             <span className="adv-cls"> ({s.where})</span>
                           )}
                         </td>
-                        <td className="adv-why">{s.why}</td>
+                        <td className="adv-why">
+                          {s.why}
+                          {s.weighted && s.weighted.why.length > 0 && (
+                            <details className="adv-weighted">
+                              <summary>
+                                {s.weighted.profile} score {s.weighted.delta >= 0 ? "+" : ""}{s.weighted.delta}
+                              </summary>
+                              <span>
+                                {s.weighted.why.slice(0, 5).map((p) =>
+                                  `${p.key} ${p.delta >= 0 ? "+" : ""}${p.delta}`
+                                ).join(" · ")}
+                                {s.weighted.cap_adjusted ? " · live stat caps applied" : ""}
+                              </span>
+                            </details>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1919,6 +1934,38 @@ export const AdvisorPanel = memo(function AdvisorPanel({
                             <td>{g.hits_per_min}</td>
                           </tr>
                         ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+
+              {gear && (gear.surplus?.length ?? 0) > 0 && (
+                <>
+                  <div className="adv-sub" style={{ marginTop: 12 }}>
+                    Surplus — safe to clear out
+                  </div>
+                  <p className="adv-note">
+                    Only two things land here: a lower rank of something you
+                    already own, and anything the wiki calls vendor trash.
+                    Class is deliberately ignored — you will swap trios, so
+                    &quot;your current classes cannot use this&quot; is not a
+                    reason to sell it. Anything the app is unsure about is left
+                    out rather than guessed at.
+                  </p>
+                  <table className="enc-table">
+                    <tbody>
+                      {gear.surplus!.map((x) => (
+                        <tr key={x.name}>
+                          <td className="enc-name">
+                            <ItemHover name={x.name} />
+                            {x.where && <span className="adv-cls"> ({x.where})</span>}
+                          </td>
+                          <td>
+                            <strong>{x.action}</strong>
+                          </td>
+                          <td className="adv-why">{x.why}</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </>

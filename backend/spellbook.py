@@ -97,6 +97,38 @@ WORN_SLOTS = {
     "Legs", "Feet", "Waist", "Ammo", "Held",
 }
 
+_BANK_LOCATION_RE = re.compile(r"(?:bank|sharedbank)[1-9]\d*", re.IGNORECASE)
+_HOARD_LOCATION_RE = re.compile(r"hoard [1-9]\d*", re.IGNORECASE)
+_DEPOT_LOCATION_RE = re.compile(r"personal-depot[1-9]\d*", re.IGNORECASE)
+
+
+# Storage you OWN and can go and fetch, as opposed to what is on your body.
+# Lives beside the classifier that produces these values, because the two have
+# to move together: #9 taught the parser to tell Equipment overflow, the
+# Dragon's Hoard and the Personal Depot apart from bags, and three gates in
+# generate_gear_advice were still spelling the answer out as ("bags", "bank").
+# On a real export that silently dropped 21 items -- Ghoulbane +4 and the rest
+# of an Equipment tab -- out of the pet-gear pool, purely because they had
+# stopped being mislabelled. `bank` being on the old list is the giveaway that
+# the rule was never "in your bags", it was "owned, not worn, go and get it".
+RETRIEVABLE = frozenset({"bags", "bank", "stash", "hoard", "depot"})
+
+
+def _inventory_where(location: str) -> str:
+    """Classify an exact top-level location label from an inventory export."""
+    if location in WORN_SLOTS:
+        return "worn"
+    if location.casefold() == "equipment":
+        return "stash"
+    if _BANK_LOCATION_RE.fullmatch(location):
+        return "bank"
+    if _HOARD_LOCATION_RE.fullmatch(location):
+        return "hoard"
+    if _DEPOT_LOCATION_RE.fullmatch(location):
+        return "depot"
+    return "bags"
+
+
 _export_cache: dict = {}
 
 
@@ -143,12 +175,99 @@ def _parse_level_rows(text: str):
     return castable, sorted(set(other))
 
 
+def _is_ach_note(text: str) -> bool:
+    """Is this criterion boilerplate rather than something to go and do?
+
+    99 of 1,322 rows in a real export are one of four sentences about
+    autocompleting or being bypassed with an unlock token. They carry a
+    C/I marker like any other criterion, so counting them makes a class
+    unlock look 6/8 when it is 6/6 — and it would skew a "closest to
+    completion" sort, which is the whole point of showing progress.
+
+    Matched on the PREFIX, deliberately: the game ships both "can be
+    bypassed" and "can by bypassed", and a set of exact strings would
+    silently miss the typo.
+    """
+    return text.strip().startswith("This achievement")
+
+
+def _parse_achievements(text: str) -> dict:
+    """The /outputfile achievements dump: a three-level tab outline.
+
+    ```
+    Untapped Potential: Classes          <- section, no tab
+    C	Primary Class Unlock - Monk       <- achievement, one tab
+    C		Obtain Sandals of Alacrity.     <- criterion, two tabs
+    ```
+
+    `C` is complete and `I` is incomplete, and the marker appears on BOTH
+    levels — so this is per-criterion progress straight from the game, not
+    inferred from what is sitting in your bags. That distinction is the
+    whole reason to read this file: an item already turned in has left the
+    inventory but its criterion stays `C`, and a class confirmed at
+    creation autocompletes without the player ever holding the items.
+
+    The file was unparsed until 2026-08-13 — the stub said "structure
+    unknown until a real export exists" while a 1,841-line sample sat in
+    the game folder.
+
+    `EverQuest: Keys` and `General: Keys` are byte-identical duplicates in
+    the real export, so sections are keyed by name and a repeat is merged
+    rather than appended twice.
+    """
+    sections: dict = {}
+    order: list = []
+    cur = None
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        if "	" not in raw:                      # section heading
+            cur = raw.strip()
+            if cur not in sections:
+                sections[cur] = []
+                order.append(cur)
+            continue
+        if cur is None:
+            continue
+        # The marker leads the line and the tabs follow it -- "C	Name" is an
+        # achievement, "C		Criterion" one of its criteria -- so depth is
+        # counted AFTER the marker, not from the start of the line.
+        mark, _, rest = raw.partition("	")
+        done = mark.strip().upper() == "C"
+        depth = 1 + (len(rest) - len(rest.lstrip("	")))
+        text_ = rest.strip()
+        if not text_:
+            continue
+        if depth == 1:                            # achievement
+            entry = {"name": text_, "done": done, "criteria": []}
+            # a duplicated section must not double the rows
+            if not any(a["name"] == text_ for a in sections[cur]):
+                sections[cur].append(entry)
+        elif sections[cur]:                       # criterion
+            crit = {"text": text_, "done": done, "note": _is_ach_note(text_)}
+            last = sections[cur][-1]
+            if not any(c["text"] == text_ for c in last["criteria"]):
+                last["criteria"].append(crit)
+    for name in order:
+        for a in sections[name]:
+            real = [c for c in a["criteria"] if not c["note"]]
+            a["steps"] = len(real)
+            a["steps_done"] = sum(1 for c in real if c["done"])
+    out = [{"section": n,
+            "achievements": sections[n],
+            "done": sum(1 for a in sections[n] if a["done"]),
+            "total": len(sections[n])} for n in order]
+    return {"sections": out,
+            "count": sum(len(s["achievements"]) for s in out),
+            "done": sum(s["done"] for s in out)}
+
+
 def load_export(name: Optional[str], server: Optional[str],
                 kind: str) -> Optional[dict]:
     """Parsed export of the given kind, cached by mtime. None when absent.
     Formats: Spellbook/MissingSpells = 'level<TAB>name' rows; Inventory =
-    TSV with a Location/Name header; Achievements = format pending a first
-    real sample (line count only)."""
+    TSV with a Location/Name header; Achievements = tab-depth outline (see
+    _parse_achievements)."""
     if not name or not server:
         return None
     path = _find_export(name, server, kind)
@@ -158,7 +277,7 @@ def load_export(name: Optional[str], server: Optional[str],
         mtime = path.stat().st_mtime
     except OSError:
         return None
-    key = (str(path), mtime, kind, 5)  # bump on parser changes
+    key = (str(path), mtime, kind, 6)  # bump on parser changes
     hit = _export_cache.get(key)
     if hit is not None:
         return hit
@@ -176,6 +295,7 @@ def load_export(name: Optional[str], server: Optional[str],
         value["other_loadouts"] = other
         value["count"] = len(castable)
     elif kind == "Inventory":
+        from backend.eqlbis import canonical_inventory_name
         # Ear/Wrist/Fingers are PAIRED: the export emits two identical
         # location labels — number them or the second overwrites the first.
         # "<Loc>-SlotN" sub-rows are either bag contents (under General/Bank
@@ -201,14 +321,27 @@ def load_export(name: Optional[str], server: Optional[str],
             # key for anything we learn and want to keep -- see item_facts.
             try:
                 item_id = int(parts[2].strip()) if len(parts) > 2 else 0
+                # Column 4 is the STACK SIZE and was being discarded, so 27
+                # gnoll fangs and 42 phosphorous powder both read as one.
+                # That is the number the quest tab is counting, and the
+                # difference between "you have started this" and "you are
+                # a third of the way through it".
+                try:
+                    stack = int(parts[3].strip()) if len(parts) > 3 else 1
+                except ValueError:
+                    stack = 1
+                stack = max(1, stack)
             except ValueError:
                 item_id = 0
+                stack = 1
             empty = not item or item.lower() == "empty"
+            if not empty:
+                item = canonical_inventory_name(item)
             m = sub_re.match(loc)
             if m:
                 parent = m.group(1)
                 slot_n = int(m.group(2))
-                in_bank = parent.lower().startswith("bank")
+                parent_where = _inventory_where(parent)
                 # socket NUMBER encodes socket TYPE: a stone only fits a host
                 # socket of the same number. Record every socket (empty too).
                 if current is not None and current["loc"] == parent:
@@ -221,15 +354,14 @@ def load_export(name: Optional[str], server: Optional[str],
                         "name": item, "socket": slot_n,
                         "host_loc": parent,
                         "host": last_item_at.get(parent),
-                        "where": ("worn" if parent in WORN_SLOTS
-                                  else "bank" if in_bank else "bags"),
+                        "where": parent_where,
                     })
                     continue
-                if parent in WORN_SLOTS:
-                    continue  # non-exalt socket rows on gear: nothing to track
+                if parent_where in ("worn", "hoard"):
+                    continue  # socket metadata is not a separate owned item
                 items.append({"loc": loc,
-                              "where": "bank" if in_bank else "bags",
-                              "name": item, "id": item_id})
+                              "where": parent_where,
+                              "name": item, "id": item_id, "count": stack})
                 continue
             if empty:
                 current = None
@@ -239,13 +371,9 @@ def load_export(name: Optional[str], server: Optional[str],
                 seen_slots[loc] = seen_slots.get(loc, 0) + 1
                 key = (f"{loc} {seen_slots[loc]}" if loc in paired else loc)
                 worn[key] = item
-                where = "worn"
-            elif loc.lower().startswith("bank"):
-                where = "bank"
-            else:
-                where = "bags"
+            where = _inventory_where(loc)
             entry = {"loc": loc, "where": where, "name": item,
-                     "id": item_id, "sockets": {}}
+                     "id": item_id, "count": stack, "sockets": {}}
             items.append(entry)
             current = entry
         value["worn"] = worn
@@ -269,9 +397,8 @@ def load_export(name: Optional[str], server: Optional[str],
             item_facts.learn(items)
         except Exception:
             logger.debug("item_facts learn skipped", exc_info=True)
-    else:  # Achievements — structure unknown until a real export exists
-        lines = [ln for ln in text.splitlines() if ln.strip()]
-        value["count"] = len(lines)
+    else:  # Achievements
+        value.update(_parse_achievements(text))
     _export_cache[key] = value
     if len(_export_cache) > 64:
         _export_cache.clear()

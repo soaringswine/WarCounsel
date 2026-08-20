@@ -33,7 +33,7 @@ UI when any frontend source is newer than the last build (a stale
 mode — its `--reload` has occasionally wedged in production launches, and
 a lite deterministic mode powers a planned single .exe (see below).
 
-**Single executable** (`build_exe.bat` -> PyInstaller onefile, ~59MB,
+**Single executable** (`build_exe.bat` -> PyInstaller onefile, ~44MB,
 ~4s cold start; BUILT AND VERIFIED on Windows 11). Everything works
 except screen OCR: HUD, overlay, Atlas 3D with textures, and LLM counsel.
 FastAPI serves the static `frontend/out` at `/` (same-origin, `api.ts`
@@ -65,6 +65,46 @@ Hard-won, all of it load-bearing:
   clients are in it deliberately: the settings panel offers an API key
   field. `llm_runtime.available()` probes at runtime and the panel greys
   out what is missing.
+- **There is a SECOND packaged variant: `WarCounsel-OCR.zip`**
+  (`requirements-heavy.txt`, `build_exe.bat heavy`, the `build-ocr` CI job
+  — same app, screen OCR included). Three things about it are deliberate:
+  - **It is `--onedir`, not `--onefile.`** A one-file bundle re-extracts
+    its whole payload to a temp dir on EVERY launch — that IS the ~4s cold
+    start — so the cost scales with size. At 200MB that tax would land on
+    every start, which is also why OCR is not simply added to the lean
+    build: the people who never enable it would pay for it forever.
+  - **The size is opencv, not the OCR engine.** Measured 2026-08-08:
+    cv2 112.4MB, onnxruntime 42.5, numpy 30.8, rapidocr 15.6, mss 0.4 —
+    204.6MB total, against a 43.6MB exe. `mss` is 0.4MB and is never the
+    problem, whatever the error message suggests. **opencv-python-headless
+    does NOT help** (112.0MB — the same 82MB `cv2.pyd` on Windows; the
+    ~40MB figure quoted for it is the WHEEL). What IS droppable is
+    opencv's 29.4MB `opencv_videoio_ffmpeg*.dll`, a video codec that OCR
+    on still screenshots cannot reach; the build deletes it.
+  - **CI asserts `/api/ocr/status.deps_ok` on the built artifact.** The
+    import guard in `ocr_system` is broad on purpose (a half-present
+    rapidocr raises `FileNotFoundError`, not `ImportError`), so a broken
+    OCR bundle looks exactly like a working one until someone enables it.
+    `deps_ok` alone proved too weak — `run_companion.py --ocr-check`
+    (mirroring `--overlay-check`) runs the REAL engine over a rendered
+    "X: 1234" and fails unless the digits come back.
+  - **Build the OCR release on PYTHON 3.12.** The engine renamed itself and
+    the two packages are not interchangeable: 3.12 gets
+    `rapidocr-onnxruntime` v1, which SHIPS its ONNX models; 3.13 gets
+    `rapidocr` v2, which ships none and DOWNLOADS them on first use.
+    `--collect-all` cannot bundle what does not exist, so the 3.13 build
+    passed every import check and then hung inside the engine waiting on a
+    download — 114 minutes of CI before anyone looked. A packaged build
+    must work offline, the same reason `maps/` and `zem_levels.wiki` are
+    bundled. Every CI step that runs the engine carries `timeout-minutes`,
+    because this class of failure WAITS rather than erroring.
+  - **Verify on the Python CI actually builds with.** The v1/v2 split meant
+    a local check on 3.12 passed while the shipped 3.13 build was broken —
+    the local run never touched the same package.
+  - The two jobs are INDEPENDENT (no `needs:`): the optional download must
+    never hold back the exe most people use.
+  - `Windows.Media.Ocr` is not an alternative — it silently drops short
+    lines like "Z: 4", which is precisely the data this reads.
 - The packaged updater cannot pull or rebuild a source tree, and the exe
   cannot overwrite itself while running — it points at the releases page.
 
@@ -172,6 +212,27 @@ All styling is CSS custom properties in `app/globals.css` — **no Tailwind**.
   by Spirit Tap") — encounter heal rows key "Spell — Healer". Incoming
   avoidance parses per defense verb (block/dodge/parry/riposte/miss) into
   the per-fight defense line. Loot-and-auto-sell lines tag "(sold)".
+- **Whether damage was cast is decided PER EVENT, in a 12s window** —
+  `_cast_less()`, not "did the session ever see a cast". A name you both
+  cast AND proc collapses onto whichever came first under a set: Ignite,
+  granted by an owned Shimmering Ruby Stiletto and also scribed, was
+  hand-cast 532 times and fired cast-less 407 more in one log, and all 939
+  were reported as casts.
+  - 12s is MEASURED, not borrowed from the tool that suggested it: across
+    18,721 cast/damage pairs the gap is 2.0s median, 6.0s at p99, 99.8%
+    inside 12s, and the curve is FLAT to 30s — so a wider window buys
+    nothing and only risks calling a proc a cast.
+  - The old rule also demanded `spell_file.is_proc()`, which is False for
+    both Ignite and Burn: item-granted procs are not in the client spell
+    file at all (the known limit, one section down). The static answer said
+    "not a proc" while the log said otherwise 407 times.
+  - **Cast-less is NOT a general "this is a proc" test and must not become
+    one.** Smite is the counter-example: the Paladin ABILITY is a melee verb
+    whose rider `Smiting Strike` lands 6,608 times and is never cast, while
+    the Smite SPELL is cast 1,209 times. Cast-less says no cast caused it;
+    it says nothing about what did. Source claims stay with owned-stone
+    evidence — per jmoyers/everquest-companion's own note, "a proc line
+    never names its source", and every attribution there is co-occurrence.
 - Exaltation procs share the spell-damage line shape; effects granted by
   owned stones (wiki-mined into tracker.exalt_effects at startup/export
   refresh/character switch) label ability rows "(exaltation)" — MINUS any
@@ -320,15 +381,45 @@ hours-to-level estimate (exact only after a same-session ding).
   section, and a Vitals list.
 - **Tracked rules** (backend/alerts.py, data/tracked_rules.json):
   SUBSTRING-only matches (never regex) on loot/kill/death/zone/tell/
-  fade ("*" = match all) plus "bighit" (pattern = damage threshold); 5s
-  per-rule cooldown; live events only; mtime-reloaded on edit.
+  fade/interrupt/fizzle/cast/mechanic/mez ("*" = match all) plus
+  "bighit" (pattern = damage threshold); 5s per-rule cooldown; live
+  events only; mtime-reloaded on edit.
+  - **A rule kind is only half the work — the event must FIRE it.** The
+    last five kinds were added in 2026-08 for a Discord question ("can you
+    trigger on a spell interrupt, like GINA?") whose answer was no for no
+    good reason: `ev.CastInterrupted` had been parsed all along, spell name
+    and all, with nothing wired to it. When adding a kind, grep
+    `_fire_alerts` in state_tracker.py — a kind that reaches no event is
+    invisible and looks exactly like a rule that never matches.
+  - `KIND_HELP` states what each pattern is compared AGAINST ("fade" sees
+    `"<spell> (<target>)"`, "cast" sees `"<caster>: <spell>"`). The panel
+    renders it, because a pattern aimed at the wrong half of the string
+    fails silently and forever.
+  - **`load_rules()` drops disabled rules; `all_rules()` does not.** An
+    editor needs the disabled ones — they are what it exists to switch back
+    on — and the seeded examples all ship disabled, so the enabled-only
+    `GET /api/tracked-rules` reported an EMPTY list on every fresh install.
+  - `POST /api/tracked-rules` replaces the set WHOLE (no merge: a list has
+    no per-field identity, and merging makes deletion impossible — the
+    opposite of the API-key rule). Written atomically; every reader,
+    including the overlay in its own process, picks it up by mtime.
+  - "cast" fires OUTSIDE the encounter window on purpose: a mob's cast line
+    is the only warning before it lands, and the most useful one is the
+    fight that has not started yet.
   BUILT-INS need no rules: "You have been summoned!" and your name in
   group/guild/raid chat always alert. Tells parse BEFORE the chat guard
   (Tell/GroupChat events; group_chat never enters the ledger/WS). Fired
   alerts ride snapshot["alerts"]; the OVERLAY renders the banner and
-  plays the winsound chime (nothing else beeps). GET /api/tracked-rules
-  shows the parsed rules. TTS deliberately omitted — point users at
-  the standalone eql-alerts app for voice callouts.
+  plays the winsound chime (nothing else beeps) — it paints
+  `"<kind>: <text>"` generically, so a NEW kind needs no overlay change.
+  Rules are edited under Settings ▸ Triggers (TriggerSettings.tsx, which
+  renders the kind list from the API the way the overlay switchboard
+  does). TTS deliberately omitted — point users at the standalone
+  eql-alerts app for voice callouts.
+  - Still NOT GINA: no matching on arbitrary log lines (only the kinds
+    above), no regex or capture groups, no per-trigger text/sound/timer,
+    no package import. Those are in TODO.md, and the no-regex rule is a
+    decision to revisit deliberately, not to erode.
 - **Overlay hotkeys are POLLED, not registered** (`_poll_hotkeys`, extending
   what Ctrl+Alt+X already did): the overlay is click-through and unfocused, so
   it receives no key events, and `RegisterHotKey` would need its own message
@@ -357,6 +448,107 @@ hours-to-level estimate (exact only after a same-session ding).
   - `SECTIONS`/`PRESETS` are the single source of truth: the panel renders
     from them over the API, so the switchboard cannot drift from what the
     overlay paints. Presets are `Everything`, `Combat focus`, `Meter only`.
+
+## The WEB panels have their own switchboard
+
+`backend/panel_prefs.py` -> `data/panel_prefs.json`, edited under Settings,
+and DELIBERATELY separate from the overlay's. A 42px strip and a 340px
+column answer different questions -- you want a damage meter and nothing
+else while fighting, and the full session ledger while planning -- so one
+shared set of toggles would mean hiding deaths mid-fight also hides them
+when you sit down. Same SHAPE as the overlay's (per section, per field,
+defaults all on, `save()` merges onto current, `SECTIONS`/`PRESETS` are the
+source of truth the panel renders from), so there is one pattern to learn.
+
+- `frontend/lib/panelPrefs.ts` fetches once and re-reads on an
+  `eql:panel-prefs` event the Settings pane fires after each save, so a
+  toggle lands without a reload. **`show()` returns TRUE when the prefs have
+  not arrived or the key is unknown** — a settings feature that blanks the
+  UI while loading its own config is worse than no settings feature.
+- Ledger rows key on the EVENT TYPE (`LEDGER_FIELD`), not on `classify()`'s
+  colour kind: "milestone" covers a level-up, a coin split and a faction hit
+  at once, so hiding loot by colour would take the ding with it. An unlisted
+  or brand-new type falls to `misc` and still renders.
+- **The HUD grid's column widths now live in `page.tsx`, not CSS.** They
+  depend on three things at once — which panels Settings left on, which are
+  collapsed to a 42px strip, and the viewport — and the old form was four
+  hand-written `:has()` combinations that each assumed all four panels
+  existed. Switching one off made every one of them wrong. React writes
+  `--hud-cols` / `--hud-cols-wide`; the stylesheet's rules consume them so
+  the media queries still decide which applies. The panels announce a
+  collapse with an `eql:collapse` window event.
+- Combat-mode and slim-ledger rules address `.vitals-panel` / `.enc-panel`
+  by CLASS. `> .panel:last-child` silently retargeted the ledger the moment
+  the encounter panel was switched off.
+- **An item page's "Related quests" is a BACKLINK list, not a requirements
+  list.** It names a quest whether that quest TAKES the item, HANDS IT OUT,
+  or merely mentions it — so read straight it told a player their 78 water
+  flasks were the turn-in for five quests and that two more wanted a
+  Backpack. `_wanted_items()` checks each candidate against the QUEST's own
+  page: an item in the Reward block is what you get (Journeyman's Boots are
+  the reward of the Journeyman's Boots Quest, which the tab reported
+  backwards), prose says the same thing as "You receive a Water Flask", and
+  a page whose walkthrough never names the item is not asking for it.
+  - Ranks come off both sides first or "Ghoulbane +4" never matches the
+    "Ghoulbane" the prose names — that alone was dropping ten real turn-ins
+    in an early cut of this filter.
+  - **A curated turn-in row is never second-guessed**, and shows ONLY the
+    item the table names. Gnoll Bounty listed Water Flask and Ration beside
+    a bar counting GNOLL FANGS, because all three backlink to its page.
+  - The walkthrough half is a HEURISTIC and applies only when a walkthrough
+    exists. A page with none (Coldain Shawl #7, Zombie Flesh) keeps its
+    items — absence of prose is not evidence against, so the residue is
+    over-inclusive on purpose. Measured 2026-08-14: 56 rows to 36, with
+    every real turn-in surviving (Bone Chips, Phosphorous Powder, both halves
+    of the Thex Mallet, Ghoulbane for the Fiery Avenger).
+  - Changing what `_parse_quest` extracts means bumping the page cache key
+    (`"quest3"`), or stored entries come back without the new field.
+- **The Quests search matches over EVERY loaded row and lifts the 25-row
+  cap** — a filter that only sees what is already on screen finds nothing
+  and reads as broken. It covers item names, quest names, givers, zones,
+  unlocks and rewards, so the not-found message says exactly that rather
+  than claiming it only searched your bags.
+- **`/api/item-acquisition` carries the BASE stat line as well.** "Is this
+  worth farming for" is the question a hover card is opened to answer, and
+  where an item drops cannot answer it — a Darkforge Vambrace reading
+  `Class: SHD` tells a Paladin/Monk/Shaman not to bother, which no
+  acquisition section would. Base (+0) deliberately: the card is usually
+  opened on something not owned, so there is no rank to scale to, and
+  `scale_item_line` must not be applied here.
+  - In the zone band the hover hangs off the QUEST name, not only the
+    reward. Most quest pages there parse to nothing so their `rewards` come
+    back empty, but an equipment quest is NAMED for what it pays and the
+    item page has the stats. `item_line("Weeping Wand Quest")` even
+    fuzzy-resolves to the wand.
+- **`GET /api/zone-items` reverses the quest lookup**: not "which quests want
+  this item I hold" but "which of the things I want drop HERE", so a zone
+  line turns into a short list of things not to vendor. Its OWN endpoint,
+  because the first call mines an item page per candidate and the
+  Progression tab reads a local file — blocking one on the other makes a
+  fast tab wait on the wiki.
+  - "Drops From" lines interleave zones and mob names with nothing marking
+    which is which ("Blackburrow, a burly gnoll, a gnoll brewer"). A name
+    that resolves through `_canonical()` IS a zone; everything else is a
+    mob. Same two-namespace bridge `zem_entry_for` exists for.
+  - **Plane of Sky items cannot be placed this way** — measured 2026-08-14,
+    0 of 20 sampled class-unlock criteria have a "Drops From" section at
+    all. Those come off named island bosses and the wiki records it
+    elsewhere. eqlposky/EQProgression DO carry it ("Island 5: The Spiroc
+    Lord") but state no licence, so nothing is vendored from them. Sky is
+    absent from this band on purpose.
+  - We can only want what we can already see: quest rows come from items you
+    HOLD, so a quest needing something you have none of is invisible. Race
+    unlocks are the exception — that table is curated, so all seven turn-ins
+    count regardless. 36 of 41 candidates resolved to a zone on a real
+    character.
+- **`GET /api/quests` returns the scanned item NAMES, not just the count**,
+  because an empty search result has two very different causes: you are
+  carrying the thing and no quest page wants it, or it is not in your bags.
+  The first is the answer to "is this worth keeping" and a count cannot
+  express it. The wording stops short of "safe to sell" — the wiki not
+  tying an item to a quest is not evidence that nothing does.
+- Quests is a TAB, not a column, so its switch hides the tab button; if it
+  was the open tab the Advisor shows rather than an empty stack.
   - When exactly ONE section survives, its header is SUPPRESSED — there is
     nothing to tell it apart from, and the 15px buys another row.
 - **Timers are depleting tracks, not a text list** — the one place besides
@@ -521,6 +713,8 @@ throttled `state` pushes. REST highlights (see main.py for all):
 - `POST /api/overlay` — toggle (launches or kills; `GET` reports state)
 - `GET/POST /api/overlay/prefs` — section/field visibility (below); the
   GET also serves the SCHEMA and PRESETS the Settings panel renders from
+- `GET/POST /api/tracked-rules` — alert rules; GET includes DISABLED rules
+  and the kind list, POST replaces the set whole
 - `GET/POST /api/ocr/*` — screen-OCR position feed config
 
 ## Atlas invariants (hard-won — do not "fix")
@@ -534,6 +728,13 @@ throttled `state` pushes. REST highlights (see main.py for all):
   (they read as phantom ceilings). Ceilings are never extracted.
 - 3D camera: follow mode translates camera + orbit target by the hero's
   delta (user angle/zoom preserved); panning off-target releases the lock.
+- **Difficulty comes in TWO shapes.** `RE_DIFFICULTY` handled the
+  parenthetical form ("Befallen 4 (Refined)") and nothing handled the bare
+  tier EQL appends to instanced zones ("Plane of Hate D1"), so a public D1
+  instance charted as nothing at all — issue #7. `RE_DIFF_TIER` strips it.
+  Verified against the client's own `Resources/ZoneNames.txt` first: no zone
+  in any of the 699 rows ends in D<digits>, so the strip cannot eat a real
+  name. That check is the evidence the no-fuzzy rule demands.
 - Zone names: `normalize_zone()` strips DECORATORS only — difficulty suffix
   ("Befallen 4 (Refined)"), leading article, and EQL's "Expedition" instance
   wrapper ("New Sebilis Expedition" → "New Sebilis"). New zone = `ZONE_FILES`
@@ -566,11 +767,50 @@ throttled `state` pushes. REST highlights (see main.py for all):
     `normalize_zone()` leaves it. "estate of unrest" → "The Estate of
     Unrest" pointed at a nonexistent key (the article is already stripped)
     and suppressed the direct hit that would otherwise have worked.
+  - **The ZEM sheet and map_system are TWO NAME SPACES — bridge them with
+    `game_data.zem_entry_for()`, never by comparing strings.** The hunting
+    sheet keys on WIKI names ("The Hole", "Mistmoore Castle", "Western
+    Karana"); the log, tracker and map_system key on the GAME's ("Ruins of
+    Old Paineel", "Castle Mistmoore", "West Karana"). Nine zones spelled
+    differently and nothing reconciled them, which broke BOTH directions:
+    the leveling chart could recommend a zone that `find_route_ex` then
+    could not resolve ("no route known" for a zone two hops away), and
+    looking up the zone you are STANDING in answered "not in the sheet"
+    while its row sat there under the other spelling — a camp-value
+    prototype cheerfully advised moving to The Hole while standing in it.
+    Both sides reduce to `_canonical()` first, the same fix
+    `/api/trio-compare` uses for `class_str`. `hunting_candidates()` now
+    also returns `key` (the map spelling, or None when genuinely
+    unplaceable). `scripts/zone_coverage.py` fails if any sheet name stops
+    bridging; it was 64/73 before 2026-08-09 and is 73/73 now.
+  - **The client ships the authoritative roster: `Resources/ZoneNames.txt`**
+    (`id^long name^lo^hi`). The long name is EXACTLY what "You have entered
+    X." prints, and `lo`/`hi` are `0^0` for every zone EQL does not run — 77
+    live zones at launch, out of 699 rows. `scripts/zone_coverage.py` walks
+    it through `_canonical()`, so a zone we cannot chart is found BEFORE a
+    player walks into it. **Do not guess a short name from the long one**:
+    `spells_us.txt` teleport rows carry `name^0^<short zone>` (row 54915 is
+    how "The Ruins of Old Paineel" was proven to be `hole`), and the .s3d
+    must exist on disk. That pairing is the evidence the no-fuzzy rule
+    demands.
   - `_canonical()` logs an unresolved zone once. A miss fails SILENTLY —
     the panel just shows nothing — which is how New Sebilis Expedition went
-    53 visits with no chart while sebilis.txt/.s3d sat in the game folder.
-    Re-audit after a patch by counting "You have entered" names from a real
-    log through `load_map`.
+    53 visits with no chart while sebilis.txt/.s3d sat in the game folder,
+    and how 14 more (The Hole, both Neriak dash spellings, the Planes, the
+    Warrens, Runnyeye, Splitpaw, Mistmoore, the Qeynos Aqueducts) survived
+    to 2026-08. Run the coverage script after a patch rather than waiting
+    for the report.
+  - **An alias is consulted BEFORE the direct `ZONE_FILES` hit, so a bad one
+    is worse than none.** `"castle mistmoore" -> "Mistmoore Castle"` pointed
+    at a key that does not exist AND suppressed `"Castle Mistmoore"`, which
+    was right there and would have worked. Same shape as the Estate of
+    Unrest note above; the coverage script catches both.
+  - Zones reached only by ritual (the Planes) get ZONE_FILES entries but no
+    ZONE_GRAPH edges — chart and 3D work, routing to them does not.
+    `Lake Nerius` is an .eqg zone: chart-only, since geometry_system reads
+    s3d/wld. `Plane of Hate` resolves to the 2001 revamp `hateplaneb` (the
+    client keeps both files; only hateplaneb has EQL emitter resources), with
+    the original as fallback — swap the candidate order if a layout is wrong.
 - Routing (`find_route_ex`, /api/route): walk edges + NAVAL TRANSLOCATOR
   dock cliques (any dock -> any dock on the route, one hop; boats do not
   exist on EQL) + druid/wizard PORT RITUALS as jump-from-anywhere edges
@@ -616,6 +856,76 @@ display**; failing entries are dropped and logged, never shown. The gates
   rank-1 records fall back past id-10 charisma spacers). Owned picks
   superseded by another owned usable spell are dropped.
 - Long-duration buffs route to a separate `prebuffs` section.
+- **A pre-buff is decided by TARGET and EFFECT, not by duration.** Owning a
+  spell that lasts 14 minutes says nothing about whether you cast it on
+  yourself before a pull. Ensnare was offered as a pre-buff because nothing
+  asked who it lands on, and Treeform because nothing asked what it does —
+  self-target, 36 minutes, and it roots you in place. `_is_prebuff()` is the
+  one test all three paths share (`_long_buffs` for the prompt,
+  `_backfill_prebuffs` for the deterministic additions, `_gate_prebuffs` for
+  the verifier); before it, each checked a different subset.
+  - **`_is_prebuff()` is shared with the SPELL-SET WRITER** (`main.py`'s
+    `/api/spellsets/generate`), which kept its own list. The two disagreed
+    in BOTH directions: the writer dropped see-invisibility, which the
+    advisor kept, and it kept root and charm, which the advisor drops — so
+    `/memspellset` could write Treeform into a pre-buff bar and plant you in
+    the ground. One definition, both callers.
+  - Levitate (57) and see-invisibility (13) are excluded for the reason
+    invisibility already was: long, self-landing, structurally perfect
+    buffs that you cast to cross a zone or find something hiding, not as
+    part of buffing up. In a list bounded by your gem count they push out
+    something you would actually fight better for.
+  - Charisma (10) too — `_BUFF_NOISE` already declares it noise, so a spell
+    whose LEADING effect is charisma is one we can say nothing about. Spirit
+    of Snake rendered as "long buff" and nothing else, which is filler
+    wearing a recommendation.
+  - `_BUFFABLE_TARGETS = {6, 41, 43, 51}` — self, single friendly, and the
+    two group forms. Read off spells whose purpose is unambiguous (Stun,
+    Fear and Ensnare are 5; Befriend Animal is 9; Feral Spirit is 14) rather
+    than assumed from the id, the same evidence rule the zone table follows.
+  - Root (SPA 99) and charm (22) joined `_NOT_A_BUFF_SPAS` alongside
+    invisibility and the remote eye.
+- **Cap AFTER supersession, never before.** The spellbook runs low level to
+  high, so truncating it kept Skin like Rock and Center and cut the Skin
+  like Steel and Symbol of Transal that replace them. Identical in shape to
+  the `missing_spells` shopping list, where an ascending cap kept the 25
+  LOWEST and anyone with a backlog got an empty list.
+- **`_gate_stacking` must consider EVERY claimed slot.** It used to `break`
+  at the first one, so a spell occupying two slots resolved one conflict and
+  stopped: Skin like Steel displaced Center on `ac-slot-1` and never reached
+  `druid-spell-lines-hp-ac`, where Skin like Rock was still sitting, so the
+  pair it supersedes survived beside it. Displaced entries are TOMBSTONED
+  rather than removed — `claimed` holds indices into `kept`, and compacting
+  mid-loop invalidates them.
+- **Equal magnitudes are broken by the PLAYSTYLE, not by list order.** Skin
+  like Steel and Protection of Steel are the same 50 AC / 50 HP for the same
+  36 minutes; the only difference is who else it lands on. `_effect_shape`'s
+  fallback kept whichever came first, which handed a `solo_dps` character
+  the group form of every armour buff. `_prefers_group()` decides it —
+  solo prefers the single-target twin, grouped prefers the group one. A
+  TIE-BREAK only: a stronger group buff still beats a weaker single one.
+- A group form the curated table does not carry inherits its twin's verdict
+  when the player owns that twin (paired on identical effect SHAPE and
+  magnitude, never on the name — "Protection of" resembling "Skin like" is
+  what the no-fuzzy rule exists to prevent). When the twin is NOT owned the
+  group form survives uncompared, which is the partial-coverage rule working
+  as intended. **Do not "fix" that with a subset rule** — Holy Armor's
+  effects are a subset of Skin like Steel's at lower magnitudes, and it
+  occupies `ac-slot-4`, so the two genuinely stack; a subset rule would drop
+  exactly the buff this section was fixed to restore.
+- **Pre-buffs are capped at `spell_slots`, the same gem count as the
+  loadout** (`_cap_prebuffs`). They are cast by memorizing one, casting it
+  and swapping the gem back, so a seventeen-entry routine against a
+  fourteen-slot book describes something nobody can do in one pass — and the
+  overflow was silent. PERMANENTS are kept first wherever they were
+  proposed: cast once, held until death, so they earn a gem far more cheaply
+  than anything re-cast between pulls. The prompt states the same limit; the
+  cap enforces it, per the house rule that the gate is authoritative.
+- **Magnitude orders the pre-buff list; it must not decide membership.**
+  "hit points 50" over "armor class 21" over "strength 5" ranks three
+  unrelated numbers. Sorting by it and then capping at 8 is how Holy Armor,
+  Strength of Earth and Shield of Brambles went missing — small numbers,
+  real buffs, nothing superseding them.
 - **Locations are gated against the community Recommended-Levels table**:
   the raw WIKITEXT is parsed (the rendered page collapses empty cells) from
   in-era sections only (Antonica/Odus/Faydwer + Planes of Fear/Hate/Sky —
@@ -675,6 +985,38 @@ display**; failing entries are dropped and logged, never shown. The gates
   travel/summon/pet/FD/res SPAs) are listed in the prompt with a
   never-say-"refresh" instruction — Instrument of Nife-class buffs last
   until death.
+- **Cached counsel carries a CODE revision, and adding a gate means adding
+  its module to `_COUNSEL_SOURCES`.** Counsel persists to
+  `advice_cache.json` and the tab loads it with `?cached=1`, so freshness
+  used to be decided purely from character state and export timestamps —
+  nothing about the code that produced it. Installing a release that FIXED
+  an advisor gate therefore left the old counsel showing as current with
+  `stale: false`, and the fix could not correct output already on screen
+  (PR #8, soaringswine). Source builds hash every gate-holding module;
+  frozen builds use `APP_VERSION`, since PyInstaller does not guarantee
+  readable source. Hashing zero files falls back to `APP_VERSION` rather
+  than returning a constant, which would silently restore the bug.
+  - `advisor.py` alone is NOT enough: `scale_item_line`, `weapon_indices`,
+    `proc_rates`, `item_stat_vector` and the location gate live in
+    `game_data.py`, and the curated stacking lines in `spell_lines.py`.
+    `tests/test_counsel_revision_sources.py` parametrizes over the tuple, so
+    a new gate module gets covered the moment it is listed — and stays
+    uncovered, loudly, if it is not.
+- **A consult is discarded only when the MODEL BEHIND IT changed, and a
+  cleared memory cache is not a lost consult.** Two bugs, one report ("I did
+  a consult, clicked another tab, and it was gone"):
+  - `api_settings_set` cleared both caches whenever `llm_provider` appeared
+    in the body — and SettingsModal sends it on EVERY save. So saving a game
+    folder, or ticking a checkbox with nothing to do with the advisor, threw
+    away counsel the user had waited a minute for. It compares `active()`
+    before and after now.
+  - `?cached=1` fell straight to `{"cached": false}` when memory was empty,
+    while `data/advice_cache.json` still held the answer. That defeats the
+    whole persistence design — and PR #8's stale path, which exists so a
+    superseded consult stays VISIBLE rather than vanishing. Both consult
+    endpoints re-read the file before giving up.
+  - The disk copy is written per consult and survives reloads; verified by
+    forcing a reload and watching 17 advisor keys and 14 gear keys come back.
 - Deterministic extras: a vendor "purchase" list (near-level missing
   spells, buy-ahead marked), nice_to_have backfilled with owned
   non-superseded alternatives when the LLM lists few, and cached counsel
@@ -721,6 +1063,17 @@ display**; failing entries are dropped and logged, never shown. The gates
   persisted) is compared against the launch boundary; the snapshot carries
   `pet_inventory_stale`, the panel reads "Was holding (BETA)", and the sync
   hint is urgent.
+- **The Progression panel WITHHOLDS pre-launch data rather than labelling
+  it.** Flagging is the rule everywhere else, and this is the documented
+  exception. A beta achievements export on a real character claimed
+  "Primary Class Unlock - Monk — DONE, all six Sky items" while the current
+  export says Monk 0/6 and Paladin 4/4: not stale, a confident wrong answer
+  to "have I finished this", and a banner above the panel does not stop the
+  body of it asserting the claim. The banner carries a "show it anyway"
+  button; a reload re-blocks, because the reveal is per-look and not a
+  setting. Flagging has to be remembered on every surface and fails silently
+  where it was not — the achievements export sat 633 hours old with NO hint
+  at all until 2026-08-13, which is the argument for failing safe here.
 - **Pre-launch exports are flagged, not just aged.** `_pre_launch()` compares
   a file's mtime against `settings.eql_launch_iso` (2026-07-28). An export
   from beta is not merely stale: a character need not survive a launch, so
@@ -1148,7 +1501,18 @@ per-guide cap from it (floor 3200, ceiling 9000 — beyond that guides crowd
 out the gear/spell context they exist to inform, and a 10k-token prompt
 measured ~3.9s locally).
 
-- **Cloud providers are never scaled up.** Ample context, billed tokens.
+- **Metered cloud APIs are never scaled up.** Ample context, billed tokens.
+- **CLI providers ARE**, to the 9000 ceiling. `claude_cli`/`codex_cli` shell
+  out to a subscription CLI — a 200k window and nothing billed per token —
+  so the floor was rationing against a cost that does not exist, and an
+  Opus-class model read class guides truncated for an 8k llama. A manual
+  pin still outranks this: pinning a number is describing a window.
+- **`_warn_if_truncated` only fires where the limit describes the MODEL** —
+  local/LM Studio, or any provider with a manual pin. `context_limit()`
+  returns 8192 for cloud and CLI on purpose, so comparing a prompt to it
+  accused a 200k-window model of truncating: a `claude_cli` consult that saw
+  the whole 13,589-token prompt told the player their spellbook had been cut
+  off and to raise a limit that would not have changed what the model saw.
 - **The manual override lives in `app_config.json`, not `llm_config.json`.**
   Reading the wrong file made a pinned value silently do nothing. The
   settings panel writes every non-secret override to app_config.
@@ -1364,6 +1728,21 @@ model selection itself is runtime-switchable in the UI.
 
 ## Settings & secrets (the gear in the header)
 
+- **`app_config` stores every override as a STRING, and neither caller
+  validates on assignment** — so `"false"` lands on a bool field intact and
+  reads as TRUE. `allow_spellset_write` saved correctly, the file on disk was
+  right, and the flag stayed on. `app_config.apply(target)` is now the single
+  place that pushes overrides onto a settings object and coerces against what
+  the field already holds; the startup validator and `POST /api/settings` had
+  each written that loop themselves, so the bug existed twice.
+- **`allow_spellset_write` is OFF by default** (`config.py`, allow-listed in
+  `app_config.FIELDS`, switched under Settings ▸ General). Writing the
+  `[SpellLoadouts]` section of `LO*.ini` is the ONLY thing this app writes
+  inside the game folder, and it is the one place a strict reading of the
+  Daybreak Terms has anything to bite on — so it is the player's decision,
+  not the installer's. Same reasoning that keeps `eqclient.ini` read-only.
+  The gate lives on the ENDPOINT, not only in the UI: a hidden button is not
+  a closed endpoint.
 - **Three layers, and they do not mix.** `.env` is the base; the UI writes
   non-secret overrides to `data/app_config.json` (applied in `config.py`'s
   validator BEFORE Logs/ and maps/ derive, so a folder chosen in the panel
@@ -1420,6 +1799,11 @@ model selection itself is runtime-switchable in the UI.
 - **Parser coverage** (after any EQL patch): iterate your real log through
   `parse_line`, `Counter` the event types — a vanished category means the
   log format changed; fix `parser.py`.
+- **Zone coverage** (after any EQL patch, and whenever a zone is added):
+  `python scripts/zone_coverage.py` — runs every zone in the client's own
+  `Resources/ZoneNames.txt` through `_canonical()`. `MISS` is a bug in
+  ZONE_FILES/ZONE_ALIASES; `NOFILE` usually just means the zone ships no
+  stock chart. Exits non-zero on any MISS.
 - **Simulated combat** (no game needed): append a line to the watched log —
   `[<timestamp>] You crush a test dummy for 42 points of damage.` — the
   ledger updates within ~0.5s. Tag synthetic rows unmistakably ("test
@@ -1445,7 +1829,7 @@ model selection itself is runtime-switchable in the UI.
 
 ## Releasing
 
-Latest: **v2.1.13**. MCP server clone at `MCP_SERVER_DIR` is
+Latest: **v2.10.1**. MCP server clone at `MCP_SERVER_DIR` is
 **ArtSabintsev/everquest-legends-mcp** — note a DIFFERENT project shares that
 name (Sergeantfirstclass...); it has no tags and no `src/data/eqlbuilds`, so
 builds_data.py finds nothing there. Local clone is on **v1.3.4**; **v1.3.5**

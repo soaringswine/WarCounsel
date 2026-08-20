@@ -42,6 +42,24 @@ per-class notes for your trio:
 
 ![Exaltation tracking and farming targets](docs/screenshots/exaltations-and-farming.jpg)
 
+**Quests your bags are already partway through** — your inventory export
+joined to the wiki, so a bag of oddments becomes a list of things you can
+finish. Search it for anything you just looted. Race-unlock turn-ins get a
+real progress bar, because those totals are actually stated; wiki quests do
+not, because their counts live in prose and a number scraped from a sentence
+would send you farming the wrong amount:
+
+![Quests matched from your inventory, with turn-in progress](docs/screenshots/quests.jpg)
+
+**Progression** — class unlocks (Plane of Sky), raid targets, keys, race and
+deity unlocks, factions and the rest, read from the game's own achievements
+export. Every other Sky tracker infers this from your bags, which is wrong
+in both directions: an item you already turned in has left your inventory
+while its criterion stays complete, and a class confirmed at creation
+completes without the items ever being held. This reads the game's answer:
+
+![Progression: class unlocks and raid targets from the achievements export](docs/screenshots/progression.jpg)
+
 **The in-game overlay** — a compact always-on-top meter that lives
 over the game: ranked damage bars, draining spell/cooldown timers,
 session rates, drop tracking, and loot/kill alerts with an attention
@@ -50,6 +68,13 @@ banner. Click-through by default; Scroll Lock makes it interactive.
 You choose what it shows. Under **Settings ▸ Overlay** every section
 switches off, and so does every field inside one — keep the kill count
 but drop the coin, keep cooldowns but not every buff you refreshed.
+
+**Triggers** — under **Settings ▸ Triggers**, watch the log for what you
+would otherwise miss: a charm or mez breaking, a named spawn in the loot
+you just took, your cast getting interrupted, a mob starting something
+nasty, a hit over a number you pick. Matches are plain text, not
+patterns — nothing to escape, and `*` catches every one of a kind. A
+match raises the overlay banner.
 Start from **Combat focus** (the meter and your timers) or **Meter
 only**, then adjust. Changes reach a running overlay in about half a
 second, so you can watch it shrink while you tune it. Anything you
@@ -88,21 +113,57 @@ turn off is still in the web view, which has room for it:
   class-colored bars up to raid size, damage/DPS modes, this-fight or
   last-5-fights segments; closes itself when the game exits
 
+## A note on third-party tools and the EQL Terms of Service
+
+Game Jawn and Daybreak do not review, approve, or endorse any third-party
+add-on, including this one. That applies no matter how harmless a tool looks,
+and it applies here. Read [sections 7 and 10 of the Daybreak Terms of
+Service](https://www.daybreakgames.com/terms-of-service) and decide for
+yourself.
+
+What WarCounsel does, stated plainly so you can judge it:
+
+- **It reads. It does not play.** It tails the log file your client writes
+  when you type `/log on`, and reads data files the client ships
+  (`spells_us.txt`, `ZoneNames.txt`, zone geometry, your `/outputfile`
+  exports). It sends no input to the game, automates nothing, and every
+  action it suggests is one you perform yourself.
+- **It never touches game memory or network traffic.** No injection, no
+  packet capture, no reverse engineering of the client.
+- **It writes exactly one file inside the game folder**, and only when you
+  press the button: the `[SpellLoadouts]` section of your `LO*.ini`, so
+  `/memspellset` can recall a suggested loadout. It backs the file up first.
+  Nothing else it stores leaves its own `data/` folder.
+- **Optional screen reading (OCR)** reads pixels from your own screen for
+  numbers the log never prints. It reads the picture, not the game.
+- **It is free and MIT-licensed.** No paid tier, no purchase component,
+  nothing paywalled.
+- **What leaves your machine:** a version check against GitHub; wiki lookups
+  to eqlwiki for item and spell pages; and, only if you configure an LLM
+  provider yourself, your character context to that provider. Run it with a
+  local model, or no model at all, and nothing about your character leaves
+  the machine.
+
+None of this is legal advice and I am not a lawyer. The risk of using any
+third-party tool is yours, the Terms are the authority, and if a rule
+changes I would rather remove a feature than argue about it. If you believe
+something here crosses a line, open an issue — I will take it seriously.
+
 ## Get it
 
-Two ways to run it, and **the .exe is the one to pick if you just want to
+Three ways to run it, and **the .exe is the one to pick if you just want to
 play**.
 
-| | Single .exe | Source install |
-|---|---|---|
-| You must already have | nothing | Python 3.11+ and Node 18+ |
-| Setup | download, double-click | run `install_companion.bat` |
-| HUD, War Ledger, encounters, timers, alerts | yes | yes |
-| In-game overlay | yes | yes |
-| Atlas — charts, true walls, textured 3D | yes | yes |
-| Advisor + gear counsel | deterministic **or** an LLM | same |
-| Screen reading — position, character stats | no | yes |
-| Download | ~42 MB, one file | a repo plus its dependencies |
+| | Single .exe | OCR build | Source install |
+|---|---|---|---|
+| You must already have | nothing | nothing | Python 3.11+ and Node 18+ |
+| Setup | download, double-click | unzip, double-click | run `install_companion.bat` |
+| HUD, War Ledger, encounters, timers, alerts | yes | yes | yes |
+| In-game overlay | yes | yes | yes |
+| Atlas — charts, true walls, textured 3D | yes | yes | yes |
+| Advisor + gear counsel | deterministic **or** an LLM | same | same |
+| Screen reading — position, character stats | no | **yes** | yes |
+| Download | ~44 MB, one file | ~5× that, a folder | a repo plus its dependencies |
 
 **[Download WarCounsel.exe →](https://github.com/EKirschmann/WarCounsel/releases/latest)**
 
@@ -110,6 +171,13 @@ It needs nothing installed, finds your game through the Windows registry,
 and keeps its data in a `data` folder beside itself. First launch takes a
 few seconds (a one-file build unpacks itself each time); after that it is
 the same app as the source install.
+
+**`WarCounsel-OCR.zip`** on that same page is the identical app with screen
+reading included. It is a separate download because the image-recognition
+packages weigh ~200 MB — around five times the rest of the app — and a
+one-file build unpacks its whole payload on *every* launch, so folding them
+in would slow the start for everyone who never turns the feature on. That
+build ships as a folder for the same reason: it unpacks once, not each time.
 
 Windows **will** warn you that it does not recognise the publisher — the
 file is unsigned. [INSTALL.md](INSTALL.md#option-a--the-single-exe) shows

@@ -13,11 +13,15 @@ from typing import Optional
 from backend import alerts, builds_data, race_unlocks, spell_file
 from backend.alert_data import (ABILITY_COOLDOWNS, BASE_DURATION_ROWS,
                                 COOLDOWN_SHAVES, SPELL_TIMERS,
-                                TIER_DURATION_RATE)
+                                LEVEL_DURATION_ROWS, TIER_DURATION_RATE)
 from backend.log_system import events as ev
 from backend.log_system.parser import CLASS_ABBREV, spell_tier, strip_tier
 
 logger = logging.getLogger(__name__)
+
+# How long after our own cast that spell's damage may still be arriving.
+# See CharacterTracker._cast_less for the measurement behind it.
+PROC_CAST_WINDOW_S = 12.0
 
 DPS_WINDOW_SECONDS = 60
 COMBAT_TIMEOUT_SECONDS = 8
@@ -114,6 +118,65 @@ def _tier_scaled(base: str, secs: int, cast_name: str) -> int:
     return int(secs * (1 + TIER_DURATION_RATE * tier))
 
 
+def _duration_formula_ticks(formula: int, level: int) -> int:
+    """Return base duration ticks for EverQuest buff formulas 1 through 15."""
+    if formula == 1:
+        return level // 2 if level > 3 else 1
+    if formula == 2:
+        return level // 2 + 5 if level > 3 else 6
+    if formula == 3:
+        return 30 * level
+    if formula == 4:
+        return 50
+    if formula == 5:
+        return 2
+    if formula == 6:
+        return level // 2 + 2
+    if formula == 7:
+        return level
+    if formula == 8:
+        return level + 10
+    if formula == 9:
+        return 2 * level + 10
+    if formula == 10:
+        return 3 * level + 10
+    if formula == 11:
+        return 30 * (level + 3)
+    if formula == 12:
+        return level // 4 if level > 7 else 1
+    if formula == 13:
+        return 4 * level + 10
+    if formula == 14:
+        return 5 * (level + 2)
+    if formula == 15:
+        return 10 * (level + 10)
+    raise ValueError(f"unsupported buff duration formula: {formula}")
+
+
+def _level_scaled_duration(base: str, cap_seconds: int,
+                           caster_level: Optional[int]) -> int:
+    """Resolve level-based client buff duration formulas to seconds.
+
+    SPELL_TIMERS normally stores a fixed duration. A row listed in
+    LEVEL_DURATION_ROWS stores its client duration CAP instead; apply the
+    formula at the tracker's current level before any upgrade-tier scaling.
+    Unknown levels use the spell's minimum cast level so the timer remains
+    conservative rather than incorrectly displaying the cap.
+    """
+    rule = LEVEL_DURATION_ROWS.get(base)
+    if not rule:
+        return cap_seconds
+    formula, cap_ticks, minimum_level = rule
+    level = max(caster_level or minimum_level, minimum_level)
+    try:
+        ticks = _duration_formula_ticks(formula, level)
+    except ValueError:
+        logger.warning("unsupported timer duration formula %s for %r",
+                       formula, base)
+        return cap_seconds
+    return min(ticks, cap_ticks) * 6
+
+
 # "A froglok ghoul", "the guard" -- an attacker carrying an article is an
 # NPC, never a player.
 _NPC_NAME = re.compile(r"^(?:[Aa]n?|[Tt]he) ")
@@ -147,6 +210,13 @@ class CharacterTracker:
         self.pet_slots: Optional[int] = None     # pet equipment slots (user-set)
         self.pet_classes: Optional[str] = None   # pet's equip class(es), user-set
         self.max_hp: Optional[int] = None        # user-reported (log has no max HP)
+        # /con results, keyed by mob name. EQL prints the mob's LEVEL
+        # outright, which is the only objective per-mob difficulty the
+        # log carries -- colour and verdict prose are not comparable
+        # across levels. Kept across encounters so a mob considered
+        # once stays classified for every later fight with it.
+        self.considered: dict = {}
+        self.oom_count = 0
         self.max_mana: Optional[int] = None      # user-reported
         self.zone: Optional[str] = None
         # Session counters (live events only)
@@ -251,6 +321,11 @@ class CharacterTracker:
         self.exalt_ambiguous: set = set()
         # spells this character has been SEEN casting (log evidence)
         self.spell_casts: set = set()
+        # WHEN each spell was last cast, not merely whether it ever was.
+        # A name you both cast and proc -- Ignite, off an owned stone, 532
+        # casts and 407 proc hits in one log -- collapses to whichever the
+        # session saw first if all you keep is a set.
+        self.spell_cast_at: dict = {}
         self.crits = 0
         self.coin_copper = 0  # session coin total, all sources (in copper)
         self.rune_absorbed = 0  # damage eaten by rune buffs this session
@@ -304,7 +379,17 @@ class CharacterTracker:
                               # is often the last thing before a zone line,
                               # so tracker.zone has already moved on by the
                               # time pending_encounters drains
-                              "zone": self.zone, "level": self.level}
+                              "zone": self.zone, "level": self.level,
+                              # survivability signal, richer than a death:
+                              # hp_floor tracks the deepest point reached by
+                              # walking damage/heals against max_hp, and oom
+                              # counts a loss condition that leaves no other
+                              # trace. Both are None/0 when unknowable.
+                              "hp": self.max_hp, "hp_floor": self.max_hp,
+                              "oom": 0,
+                              # stamped from /con at creation, so a later
+                              # re-con cannot rewrite a finished fight
+                              "mob_level": None, "mob_rare": False}
         else:
             self.encounter["last"] = ts
             # ...and OUR clock, which is what bounds how long a groupmate
@@ -513,21 +598,57 @@ class CharacterTracker:
                     self._mob(self._last_kill[0])[key] += pend[1]
                 setattr(self, attr, None)
 
-    def _fx_label(self, spell: str) -> str:
+    def _fx_label(self, spell: str, ts=None) -> str:
         """Exaltation procs share the spell-damage line shape — the effect
-        name gives them away. Names that are ALSO scribed label only when
-        the client spell file marks them proc-granted AND this session
-        never saw a cast (log evidence beats static data)."""
+        name gives them away. Names that are ALSO scribed are decided PER
+        EVENT: damage with no cast of that spell behind it was not cast.
+
+        This used to ask "did the session ever see a cast", which collapses
+        a name you both cast and proc onto whichever came first. Ignite is
+        exactly that — granted by an owned Shimmering Ruby Stiletto and also
+        scribed — and in one 138MB log it was hand-cast 532 times and fired
+        cast-less 407 more. All 407 were reported as casts.
+
+        The old rule also required spell_file.is_proc(), which is False for
+        Ignite and Burn: item-granted procs are not marked in the client
+        spell file at all. So the static answer was "not a proc" while the
+        log said otherwise 407 times. Log evidence beats static data — the
+        comment always said so; now the code does.
+        """
         low = (spell or "").lower()
         base = strip_tier(low)
         if low in self.exalt_effects or base in self.exalt_effects:
             return f"{spell} (exaltation)"
         if ((low in self.exalt_ambiguous or base in self.exalt_ambiguous)
-                and low not in self.spell_casts
-                and base not in self.spell_casts
-                and spell_file.is_proc(low)):
+                and self._cast_less(low, base, ts)):
             return f"{spell} (exaltation)"
         return spell
+
+    def _cast_less(self, low: str, base: str, ts) -> bool:
+        """Did this damage arrive without one of OUR casts behind it?
+
+        12 seconds, measured rather than borrowed: across 18,721 cast/damage
+        pairs in a real log the gap is 2.0s at the median, 6.0s at p99, and
+        99.8% land inside 12s — with the curve flat from there to 30s, so a
+        wider window buys nothing and only risks calling a proc a cast.
+
+        NOT a general "is this a proc" test, and deliberately not used as
+        one. Smite proves why: the Paladin ABILITY is a melee verb whose
+        rider, Smiting Strike, lands 6,608 times and is never cast, while
+        the Smite SPELL is cast 1,209 times. Cast-less says a cast did not
+        cause it; it says nothing about what did. Source claims stay with
+        the owned-stone evidence.
+        """
+        if ts is None:
+            return False
+        seen = [t for t in (self.spell_cast_at.get(low),
+                            self.spell_cast_at.get(base)) if t is not None]
+        if not seen:
+            return True
+        try:
+            return (ts - max(seen)).total_seconds() > PROC_CAST_WINDOW_S
+        except TypeError:
+            return False
 
     def _encounter_heal(self, ts: datetime, label: str, amount: int,
                         crit: bool = False) -> None:
@@ -569,6 +690,47 @@ class CharacterTracker:
         if target:
             enc["target"] = target
             self._encounter_foe(target, dealt=damage)
+            # /con almost always precedes the pull, so the level is usually
+            # already known by the time the first hit names the target
+            if enc.get("mob_level") is None:
+                seen = self.considered.get(target.lower())
+                if seen:
+                    enc["mob_level"] = seen.get("level")
+                    enc["mob_rare"] = bool(seen.get("rare"))
+
+    def _is_self(self, who: Optional[str]) -> bool:
+        """Does this name refer to the tracked character?
+
+        EQL writes the PLAYER as the literal word "you" in lines addressed to
+        them -- measured on a real log, all 161 heals landing on the player
+        read "healed you" and NONE used the character name. A bare
+        name-equality test therefore matched nothing, and healing_received
+        silently counted zero of 17,954 hp of incoming heals.
+        """
+        w = (who or "").strip().lower()
+        return bool(w) and (w in ("you", "yourself")
+                            or w == (self.name or "").lower())
+
+    def _hp_walk(self, delta: int) -> None:
+        """Track the deepest HP reached inside a fight.
+
+        A DEATH is the tail of a distribution we can measure all of: on one
+        character 2.6% of fights ended in death while 5.3% cost over half of
+        max HP, so waiting for a death discards every near-miss -- which are
+        exactly the fights more mitigation would have changed.
+
+        Reconstructed from the log's own damage and heal events rather than
+        OCR: the stats panel only reads while the inventory window is open,
+        which is not when you are being hit. Regen ticks are NOT logged, so
+        this drifts pessimistic over a long fight; it is a floor, not a
+        gauge, and it is None whenever max HP is unknown.
+        """
+        enc = self.encounter
+        if enc is None or enc.get("hp") is None:
+            return
+        enc["hp"] = max(0, min(self.max_hp or enc["hp"], enc["hp"] + delta))
+        if enc["hp_floor"] is None or enc["hp"] < enc["hp_floor"]:
+            enc["hp_floor"] = enc["hp"]
 
     def _encounter_foe(self, name: str, dealt: int = 0, taken: int = 0,
                        slain: bool = False) -> None:
@@ -652,6 +814,8 @@ class CharacterTracker:
             if e.spell:  # log evidence for proc-vs-cast disambiguation
                 self.spell_casts.add(e.spell.lower())
                 self.spell_casts.add(strip_tier(e.spell).lower())
+                self.spell_cast_at[e.spell.lower()] = e.ts
+                self.spell_cast_at[strip_tier(e.spell).lower()] = e.ts
                 self._infer_class(e.spell, e.ts)
                 if live:
                     base = strip_tier(e.spell).lower()
@@ -662,6 +826,8 @@ class CharacterTracker:
                     else:
                         secs = SPELL_TIMERS.get(base)
                         if secs:
+                            secs = _level_scaled_duration(base, secs,
+                                                          self.level)
                             secs = _tier_scaled(base, secs, e.spell)
                             self._start_timer(e.spell, secs, "spell", e.ts)
                         elif base not in self._timer_misses:
@@ -785,11 +951,11 @@ class CharacterTracker:
                                             e.damage, e.target, crit=e.crit,
                                             mods=e.mods)
                 elif isinstance(e, ev.SpellDamageOut):
-                    self._encounter_ability(e.ts, self._fx_label(e.spell),
+                    self._encounter_ability(e.ts, self._fx_label(e.spell, e.ts),
                                             "spell", e.damage, e.target,
                                             crit=e.crit, mods=e.mods)
                 else:  # DotDamage
-                    self._encounter_ability(e.ts, self._fx_label(e.spell),
+                    self._encounter_ability(e.ts, self._fx_label(e.spell, e.ts),
                                             "dot", e.damage, e.target,
                                             crit=e.crit)
                     # first tick names the victim — bind the running timer
@@ -942,6 +1108,7 @@ class CharacterTracker:
                 self.encounter["total_in"] += e.damage
                 self.encounter["in_hits"] = self.encounter.get("in_hits", 0) + 1
                 self._encounter_foe(e.attacker, taken=e.damage)
+                self._hp_walk(-e.damage)
             elif isinstance(e, ev.MissIn):
                 # tanking view: which defense ate each incoming swing
                 enc = self.encounter
@@ -962,8 +1129,9 @@ class CharacterTracker:
                 self._encounter_heal(e.ts, f"{e.spell or 'Direct heal'} — You",
                                      e.amount, crit=e.crit)
             elif isinstance(e, ev.OtherHeal):
-                if e.target.lower() == (self.name or "").lower():
+                if self._is_self(e.target):
                     self.healing_received += e.amount
+                    self._hp_walk(e.amount)
                 healer = self.pet_owners.get(e.healer, e.healer)
                 self._encounter_heal(e.ts,
                                      f"{e.spell or 'Direct heal'} — {healer}",
@@ -975,6 +1143,10 @@ class CharacterTracker:
                     casts = enc.setdefault("other_casts", {})
                     key = f"{e.spell} — {e.caster}"
                     casts[key] = casts.get(key, 0) + 1
+                # Fired OUTSIDE the encounter window on purpose: a mob casting
+                # is the only warning before it lands, and the one you most
+                # want warned about is the one that has not hit you yet.
+                self._fire_alerts("cast", f"{e.caster}: {e.spell}", e.ts)
             elif isinstance(e, ev.Kill):
                 self.kills += 1
                 self._fire_alerts("kill", e.target, e.ts)
@@ -1009,6 +1181,7 @@ class CharacterTracker:
                     self._encounter_foe(e.victim, slain=True)
             elif isinstance(e, ev.MechanicTimer):
                 self._start_timer(e.name, e.seconds, "raid", e.ts)
+                self._fire_alerts("mechanic", e.name, e.ts)
             elif isinstance(e, ev.AbilityActivate):
                 self._start_cooldown(e.name, e.ts)
             elif isinstance(e, ev.Mend):
@@ -1038,6 +1211,7 @@ class CharacterTracker:
                         self.stuns_landed += 1
             elif isinstance(e, ev.Mesmerized):
                 self.mez_applied += 1
+                self._fire_alerts("mez", e.target, e.ts)
             elif isinstance(e, ev.Tell):
                 self._fire_alerts("tell", f"{e.sender}: {e.text}", e.ts)
             elif isinstance(e, ev.GroupChat):
@@ -1051,8 +1225,14 @@ class CharacterTracker:
                     self._fire_alerts("fade", label, e.ts)
             elif isinstance(e, ev.CastFizzle):
                 self._cancel_timer(e.spell)
+                self._fire_alerts("fizzle", e.spell or "your spell", e.ts)
             elif isinstance(e, ev.CastInterrupted):
                 self._cancel_timer(e.spell)
+                # The bard/melody form names no spell, so a "*" rule is the
+                # only way to catch every interrupt -- give it something to
+                # match rather than an empty string, which "*" would still
+                # match but a named pattern never could explain missing.
+                self._fire_alerts("interrupt", e.spell or "your casting", e.ts)
             elif isinstance(e, ev.SessionStart):
                 summ = self.session_summary()
                 if (summ["kills"] or summ["xp_percent"] or summ["loot_count"]
@@ -1081,21 +1261,35 @@ class CharacterTracker:
                     # seconds old.)
                     self._pending_xp = (e.ts, e.percent)
             elif isinstance(e, ev.AAPoint):
-                # points arrive in batches ("gained 2 ability point(s)"), so
-                # both counters move by the amount granted, not by 1
                 self.aa_points += e.count
                 if e.total is not None:
                     self.aa_available = e.total  # the log's own running total
                 elif self.aa_available is not None:
                     self.aa_available += e.count
             elif isinstance(e, ev.AASpend):
-                # The counter only ever went UP before this: gains parsed,
-                # purchases did not, so a player who spent every point still
-                # saw the old total. Floored at 0 -- the log carries no
-                # running total on a spend, so a missed gain must not push
-                # this negative.
+                # Spend lines carry no running total. Keep an unknown starting
+                # value unknown, and do not let a missed gain drive a known
+                # value below zero. Cost-zero messages are toggle state, not
+                # a purchase.
                 if e.cost and self.aa_available is not None:
                     self.aa_available = max(0, self.aa_available - e.cost)
+            elif isinstance(e, ev.Consider):
+                # remembered across fights: a mob considered once stays
+                # classified, and /con usually happens BEFORE the pull
+                self.considered[e.name.lower()] = {
+                    "level": e.level, "rare": e.rare, "ts": e.ts}
+                enc = self.encounter
+                if enc is not None and enc.get("mob_level") is None:
+                    tgt = (enc.get("target") or "").lower()
+                    if tgt and tgt == e.name.lower():
+                        enc["mob_level"] = e.level
+                        enc["mob_rare"] = e.rare
+            elif isinstance(e, ev.OutOfMana):
+                self.oom_count += 1
+                enc = self.encounter
+                if (enc is not None and (e.ts - enc["last"]).total_seconds()
+                        <= COMBAT_TIMEOUT_SECONDS):
+                    enc["oom"] = enc.get("oom", 0) + 1
             elif isinstance(e, ev.SkillUp):
                 self.skill_ups += 1
             elif isinstance(e, ev.Loot):
@@ -1485,6 +1679,21 @@ class CharacterTracker:
             "trio": enc.get("trio"),
             "zone": enc.get("zone"),
             "level": enc.get("level"),
+            # difficulty: the mob's OWN level from /con, and the gap to ours.
+            # A mob far below the player is a gimme and should carry no
+            # weight when judging gear -- but that is a decision for the
+            # consumer, so the raw numbers are published rather than a verdict.
+            "mob_level": enc.get("mob_level"),
+            "mob_rare": bool(enc.get("mob_rare")),
+            "level_delta": ((enc["mob_level"] - enc["level"])
+                            if enc.get("mob_level") is not None
+                            and enc.get("level") is not None else None),
+            # survivability: how deep the fight went, and whether mana ran out
+            "hp_floor": enc.get("hp_floor"),
+            "hp_floor_pct": (round(100.0 * enc["hp_floor"] / self.max_hp, 1)
+                             if enc.get("hp_floor") is not None and self.max_hp
+                             else None),
+            "oom": enc.get("oom", 0),
             # one lumped row, with how many sources it covers -- enough to
             # tell "the filter is hiding something" from "nobody helped"
             "unattributed": ({"damage": sum((enc.get("unattributed") or {}).values()),
@@ -1768,6 +1977,27 @@ class CharacterTracker:
             hints.append({"command": "/pet leader",
                           "reason": "A summoned pet is unmapped — its damage is "
                                     "counting as an ally's, not yours"})
+        # Achievements gets its OWN hint rather than riding the spellbook's.
+        # They go stale independently -- this character's spellbook was
+        # current while its achievements export was 633 hours old, from
+        # before launch -- and the Progression tab would have presented beta
+        # progress as fact with nothing on screen to say otherwise.
+        try:
+            from backend.spellbook import load_export as _le
+            ach = _le(self.name, self.server, "Achievements")
+        except Exception:
+            ach = None
+        if ach is None:
+            hints.append({"command": "/outputfile achievements",
+                          "reason": "No achievements export — class and race "
+                                    "unlocks, keys and raid progress all come "
+                                    "from it"})
+        elif ach.get("pre_launch"):
+            hints.append({"command": "/outputfile achievements",
+                          "urgent": True,
+                          "reason": "Your achievements export is from BEFORE "
+                                    "launch — the progression it shows belongs "
+                                    "to a beta character"})
         if book is None:
             hints.append({"command": "/outputfile spellbook",
                           "reason": "No spellbook export found; the advisor cannot see owned spells"})

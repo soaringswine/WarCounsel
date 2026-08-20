@@ -44,6 +44,462 @@ a reload and a relaunch — that is what lets "why that pick?" span
 sessions — but there was no way to clear one, so a conversation from days
 ago greeted every launch and rode into every new answer as history.
 "clear thread" beside the ask box deletes it, for that character only.
+## v2.10.1 — 2026-08-16
+
+**Fixed: the app could be using a max HP many levels out of date.** It was
+stored only when you typed one in — the stats-panel reading updated the live
+value but never wrote it back, while startup loaded the stored one. So every
+restart began with whatever you last typed and stayed there until you next
+opened the inventory window. On one character the stored value was 1948
+against an actual 3379.
+
+That was harmless until v2.10.0 started recording how far your health dropped
+in each fight. Measured against a stale maximum, a fight costing 1,900 damage
+reads as 2.5% health remaining instead of 44% — a comfortable fight logged as
+a near-death, in exactly the data meant to weigh survivability. The stored
+value now keeps up with what the app reads, and a value you type by hand still
+wins.
+
+## v2.10.0 — 2026-08-16
+
+**Fixed: gear advice could not see item effects at all.** A swap was offered
+as "+14 AC and no loss of other stats" — while quietly costing Spell Haste II,
+a 15% cast-time reduction. The stat vector has no term for an effect, so
+anything an item *does* was invisible to every comparison. Slot rows now name
+what a swap gives up.
+
+That took two wrong turns to get right, both corrected: an item's Effect line
+is its own and applies without a stone, and a socketed stone overrides it. The
+socket is exposed by **levelling** — across 23 worn items, all 20 at +1 or
+more had one and none of the 3 at +0 did — so a +0 item's focus cannot be
+moved at all, and the advice now says to merge the item first rather than just
+warning you.
+
+**Fixed: an item the wiki spells differently was invisible.** A Skull-shaped
+Barbute +3 was never offered for Head even though it strictly beats the worn
+helm (AC 17 vs 13, +46 HP, +13 SV Magic, nothing worse). Wiki titles are
+case-sensitive, the game writes Title Case, and the retry that should have
+caught it compared case-insensitively — so the item resolved to nothing and
+was silently excluded. An item with no stats never appears and nothing says
+why, which is the worst shape a bug can take here.
+
+**Fixed: spell sets saved in game could vanish.** The client keeps them in
+memory and rewrites the file wholesale when it flushes, so writing while it
+runs loses data in both directions. Writing is now refused during a session,
+with the remedy named: camp to desktop first.
+
+**Fixed: the AA counter never went down.** Purchases were not parsed at all
+and batched awards were missed — 199 spent points unaccounted across 128
+purchases in one log. Thanks to @soaringswine for the fix and the regression
+tests. (#11)
+
+**Fixed: ranged items were never compared.** The Range row said "not compared"
+because bows and thrown are outside the white-DPS index — but only their
+*damage* is. Stats compare like anything else, and now do, with only the
+damage half disclaimed.
+
+**Fixed: coordinates split across OCR boxes.** An X of 1540 could read as 1.
+
+**New: deterministic passes run before the model.** Spell candidates are
+pre-gated so a loadout slot cannot be spent on a pick that gets dropped
+afterwards (91 → 56 on a real spellbook). The wiki context is fitted per
+section instead of truncated at the tail — that tail was the AA list, and at
+the production budget **0 of 73 AA entries** were reaching the model while it
+was asked to recommend AAs "using the per-rank costs in the data". Now 26.
+
+**New: pet gear is compared, not guessed.** A deterministic pass does the
+arithmetic first and hands the model the trade-offs. Clear upgrades fill in
+automatically; genuine trade-offs deliberately do not, because choosing
+between +6 damage and −10 strength is a judgement call. Its candidate pool was
+also ranked alphabetically and cut at 40, hiding 20 items — including the
+highest-damage weapon owned.
+
+**New: encounters record how close the fight was.** A death is the tail of a
+distribution: 2.6% of fights ended in one, while 5.3% cost over half of max HP
+and 8.5% ran past 90 seconds. Each fight now carries the deepest HP reached,
+whether mana ran out, and the mob's level from `/con` — groundwork for
+weighting gear by what actually threatens you rather than by what killed you.
+
+Also fixed along the way: healing received counted **zero**. Every heal landing
+on you is logged as "you" rather than by name, and the check only matched the
+name — 17,954 hp unaccounted in a single log.
+
+## v2.9.1 — 2026-08-14
+
+**Fixed: a consult could disappear when you saved settings.** Run a consult,
+open Settings, change anything at all, and the advisor and gear counsel were
+both discarded — because the settings panel sends the advisor provider on
+every save, and any mention of it was treated as "the model changed". Only a
+real model change clears counsel now.
+
+Worse, the counsel was never actually gone. It is written to disk after
+every consult, and the tab simply was not looking there — so a cleared
+memory cache reported "no counsel" while the file held the whole thing. Both
+tabs now fall back to the file, and a consult superseded by a genuine model
+change stays on screen marked stale instead of vanishing.
+
+**Fixed: weapon procs were being counted as spells you cast.** If a spell is
+BOTH scribed and granted by an exaltation — Ignite, off a Shimmering Ruby
+Stiletto — casting it once made every later proc count as a cast for the
+rest of the session. In one log that was 407 procs filed as casts. Whether
+damage was cast is now decided per hit, in a 12-second window measured from
+18,721 real cast-to-damage pairs.
+
+**Fixed: quests that do not want what you are carrying.** The tab claimed
+five quests wanted a Water Flask and two more wanted a Backpack. An item
+page's "Related quests" list names a quest whether it takes the item, hands
+it out, or just mentions it — so the Journeyman's Boots Quest was listed as
+wanting Journeyman's Boots, which are its reward. Rewards and unmentioned
+items are filtered out; 56 rows became 36 with every real turn-in kept.
+Gnoll Bounty no longer lists water flasks beside a bar counting gnoll fangs.
+
+**Fixed: items in Shared Bank, Equipment, Dragon's Hoard and Personal Depot
+were reported as carried in your bags.** Thanks to **@soaringswine**, who
+found this, wrote the regression fixture first, and fixed it (#9). Follow-up
+here so the gear consult accepts the newly-named storage — one player had 21
+items in an Equipment tab that would otherwise have gone quiet.
+
+**The Quests and Progression tabs got a design pass.** Progression rows no
+longer repeat their own heading sixteen times ("Primary Class Unlock -
+Bard" under CLASS UNLOCKS is now just "Bard"), a finished unlock reads as
+gold and leads its section instead of being dimmed to near-invisible at the
+bottom, and empty progress rails are gone. On Quests, the requirement now
+sits beside the bar that measures it, the giver and zone read as one place,
+and rewards are labelled — they were an unlabelled list of item names next
+to a list of required item names.
+
+## v2.9.0 — 2026-08-13
+
+**New: a Progression tab.** Class unlocks, raid targets, keys, race and
+deity unlocks, factions, exploration, hunter, slayer and tradeskills — read
+straight from the game's own `/outputfile achievements` dump, which carries
+a complete/incomplete mark on every single criterion.
+
+That matters most for **Plane of Sky**. Every other Sky tracker infers your
+progress from an inventory dump, and inference is wrong in two directions:
+an item you already turned in has left your bags while its criterion stays
+complete, and a class confirmed at creation autocompletes without the items
+ever being held. This reads the game's answer instead of guessing at it.
+
+Sorted closest-to-done, with the item list tucked behind a click for
+anything you have not started — sixteen class unlocks at 0/6 is ninety-six
+lines of things you have not done, which buries the ones you have. Type
+`/outputfile achievements` in-game and press check exports; there is a
+reminder in Vitals if you have not.
+
+**Pre-launch progression is withheld rather than labelled.** A beta export
+on a real character claimed a class unlock was finished, with all six Plane
+of Sky items obtained. The current export for the same character attributes
+that unlock to an entirely different class. That is not stale data, it is a
+confident wrong answer to "have I finished this" — so the panel shows the
+warning in place of the data, with a button to look anyway.
+
+**Fixed: counsel could survive its own fix.** Advisor and gear results
+persist between launches, and opening the tab deliberately never starts an
+LLM call — so freshness was judged only from your character and exports,
+never from the code that produced the counsel. Installing a release that
+corrected an advisor gate left the old counsel on screen marked current.
+Thanks to **@soaringswine**, who found this, wrote the regression test
+first, and fixed it (#8). Extended afterwards to cover every module holding
+a gate rather than just the advisor's own.
+
+**Fixed: Ensnare and Treeform were offered as pre-buffs, and four real
+buffs were missing.** Nothing checked who a spell lands on, so a snare — a
+fourteen-minute effect cast on an enemy — passed every test for something
+to cast before a pull. Nothing checked what the effect does, so Treeform
+qualified too: self-target, thirty-six minutes, and it roots you in place.
+Levitate and see-invisibility are gone from the list for the same reason
+invisibility already was. Symbol of Transal, Strength of Earth, Holy Armor
+and Shield of Brambles are back. And the spell-set writer kept its own copy
+of these rules that disagreed with the advisor's in both directions, so
+`/memspellset` could write Treeform into a pre-buff bar.
+
+**Fixed: a solo focus was handed the group version of its buffs.** Skin
+like Steel and Protection of Steel are the same 50 AC and 50 HP for the
+same 36 minutes, so the only difference is who else it lands on — and the
+tie was being settled by list order. It asks your playstyle now.
+
+**Pre-buffs are capped at your spell slots.** You cast them by memorizing
+one, casting it and swapping the gem back, so a seventeen-entry routine
+against a fourteen-slot book describes something nobody can do in one pass.
+
+## v2.8.2 — 2026-08-12
+
+**New: a search line on the Quests tab.** You loot something and want to
+know whether it is quest fodder before you vendor it. Type the name. It
+matches item names, quest names, givers, zones, unlocks and rewards — so
+searching a zone answers "what can I finish while I am here" from the same
+box.
+
+Searching looks at every quest, not just the 25 the list shows, and lifts
+the cap while you type. A filter that only saw what was already on screen
+would miss matches silently.
+
+**An empty result now tells you which kind of empty it is.** Searching for
+something you are carrying that no quest wants used to return a blank list,
+which reads exactly like a broken search. It now says so by name: "You are
+carrying Tanned Split Paw Skin, and no quest page references it." Searching
+for something you do not have says that instead.
+
+It deliberately stops short of calling anything safe to sell. The wiki
+failing to tie an item to a quest is not evidence that nothing does.
+
+## v2.8.1 — 2026-08-12
+
+**Writing spell sets into the game folder is now OFF until you switch it
+on.** Settings ▸ General. If you use the Advisor's "save this as a spell
+set" button with `/memspellset`, turn it back on there — nothing else
+changed about how it works.
+
+Why: editing the `[SpellLoadouts]` section of your `LO*.ini` is the only
+thing this app writes inside the game folder, and it is the one place a
+strict reading of the Daybreak Terms of Service has anything to bite on.
+That should be your decision rather than the installer's. It is the same
+reasoning that has always kept `eqclient.ini` read-only — other companions
+flip `Log=1` for you; this one does not write a game file it was not asked
+to write.
+
+**Fixed: instanced zones at difficulty 1 or higher charted nothing.**
+Reported as issue #7 — standing in Plane of Hate D1 showed no map, no
+geometry, no route. Difficulty comes in two shapes and only one was
+handled: `Befallen 4 (Refined)` was recognised, `Plane of Hate D1` was not,
+so the zone resolved to nothing at all and the Atlas simply sat blank. This
+affects every zone at D1 and above, not just Hate.
+
+**Fixed: a saved settings checkbox could not be turned back off.** Settings
+overrides are stored as text, and the string `"false"` was being read as
+true — so the switch saved, the file on disk was correct, and the setting
+stayed on. Found while building the toggle above. The two places that
+applied overrides had each written the same logic separately, so the bug
+existed twice; there is now one.
+
+## v2.8.0 — 2026-08-12
+
+**Settings has a side-nav, and you choose what each panel shows.** A rail
+down the left — General, then one entry per panel, then the Overlay,
+Triggers, Screen reading and model blocks that were already there. Each
+panel entry lists its own sections as switches: turn off Deaths if you do
+not care about deaths, or Past sessions, or the whole War Ledger. Three
+presets to start from: Everything, Combat focus, Planning.
+
+Deliberately separate from the overlay's switchboard. A 42px strip and a
+340px column answer different questions — you want a damage meter and
+nothing else while fighting, and the full session ledger while planning —
+so one shared set of toggles would mean hiding deaths mid-fight also hides
+them when you sit down. Choices live in `data/`, which the updater
+preserves, so they survive both a restart and an upgrade.
+
+**Fixed: Ensnare and Treeform were being offered as pre-buffs.** Nothing
+checked who a spell lands on, so a snare — a 14-minute effect cast on an
+enemy — passed every test for something to cast before a pull. And nothing
+checked what the effect does, so Treeform qualified too: self-target, 36
+minutes, and it roots you in place.
+
+**Fixed: real buffs were missing from the pre-buff list.** Symbol of
+Transal, Strength of Earth, Holy Armor and Shield of Brambles never
+appeared. Three causes stacked: the candidate list was capped before
+supersession ran, so it kept Skin like Rock and Center and cut the Skin
+like Steel and Symbol of Transal that replace them; the stacking gate
+stopped at the first shared slot, so a spell occupying two slots resolved
+one conflict and left the other standing; and the deterministic backfill
+ranked by raw magnitude before cutting to eight, which drops small numbers
+that are nonetheless real buffs with nothing superseding them.
+
+**Fixed: a solo focus was handed the group version of its buffs.** Skin
+like Steel and Protection of Steel are the same 50 AC and 50 HP for the
+same 36 minutes, so the only difference is who else it lands on — and the
+tie was resolved by list order. It now asks your playstyle. Solo keeps the
+single-target twin; grouped keeps the group one.
+
+**Pre-buffs are capped at your spell slots.** You cast them by memorizing
+one, casting it and swapping the gem back, so a seventeen-entry routine
+against a fourteen-slot book describes something nobody can do in one pass.
+Permanents are kept first — cast once, held until death, so they earn a gem
+far more cheaply than anything re-cast between pulls.
+
+**New: a plain statement about third-party tools and the Daybreak Terms of
+Service**, in README.md and NOTICE.md. Game Jawn and Daybreak do not review
+or endorse any add-on, including this one. What the app reads, the one file
+it writes inside the game folder, and what leaves your machine are all
+itemised so you can weigh it yourself.
+
+## v2.7.0 — 2026-08-10
+
+**New: a Quests tab.** Your inventory export says what you are carrying,
+item wiki pages say which quests want each item, and quest pages carry the
+giver, zone, level and reward. Joined together, a bag of oddments becomes a
+list of things you are already partway through. On one character, 127 items
+matched 54 quests — including a Thex Mallet with both the hilt and the head
+sitting in different places.
+
+Grouped by what the quest is FOR — race unlocks, class quests, equipment,
+spells, faction turn-ins — using the wiki's own categories rather than
+labels we invented. Race unlocks name the race, class quests name the
+classes. Out-of-era content (Kunark and later, which this game does not
+implement) sits in its own section at the bottom: the items are real and in
+your bags, so the section answers "why am I carrying this".
+
+**Progress bars, where the number is actually known.** The race-unlock table
+states exact totals and your export states exact stack sizes, so those rows
+show real progress — 42/800 toward Froglok. Wiki quests get no bar, because
+their counts live in walkthrough prose and a number scraped from a sentence
+would send you farming the wrong amount. A bar on some rows and not others
+is the honest version of knowing one number and not the other.
+
+**Fixed: stack sizes were being thrown away.** The inventory export's count
+column was parsed and discarded, so 27 gnoll fangs and 42 phosphorous
+powder both read as one item. This affected anything that counted what you
+own.
+
+**Fixed: a wiki outage used to persist after the wiki recovered.** A timeout
+and a missing page looked identical to the code, so a timeout was cached as
+"this item has no data" — for an hour, or a day for vendor lookups. One
+outage could empty the quest tab and keep it empty. Failures are now told
+apart from answers, and never cached.
+
+**The Encounter panel can be collapsed**, like the War Ledger, and the
+Quests tab has the same A−/A+ text size control the Encounter panel has.
+
+## v2.6.2 — 2026-08-10
+
+**Leveling-chart zones now route.** The community hunting sheet spells some
+zones the wiki's way ("Mistmoore Castle", "The Hole", "Western Karana")
+while the log and the map use the game's ("Castle Mistmoore", "Ruins of Old
+Paineel", "West Karana"). Nine of its 73 zones differed and nothing
+reconciled them, so the chart could recommend somewhere the route finder
+then called unknown — and standing in a zone could report it as missing
+from the sheet while its row sat there under the other name.
+
+**Gear advice now looks at what your pet is carrying.** Pet inventory
+arrives from `/pet inventory check` and never reached the gear consult, so
+the app would hand items down to the pet but never notice the pet holding
+something better than you wear.
+
+**New: a surplus list** of things you can clear out. Deliberately ignores
+your classes — you will swap trios, so "your current classes cannot use
+this" is no reason to sell anything. Only two things qualify: a lower rank
+of an item you already own, and anything the wiki calls vendor trash. If
+the app is not sure, it says nothing rather than guessing, because the
+action it suggests cannot be undone.
+
+**Fixed: the updater blamed the wrong thing.** A failed update told everyone
+to `git stash`, which only helps if you have edited files. If you had
+committed something locally the advice did nothing and you stayed stuck.
+It now asks git which case it is and prints the command that actually
+applies — stash for edits, rebase or reset for commits.
+
+**Fixed: the packaged OCR build.** The v2.6.1 build job hung for nearly two
+hours because CI runs Python 3.13, where the OCR engine ships without its
+models and downloads them on first use. Pinned to 3.12, where the models
+travel with the package.
+
+## v2.6.1 — 2026-08-09
+
+**The OCR download from v2.6.0 never made it out.** Its build failed a
+check on the way — the image-recognition models were left out of the
+bundle, so screen reading would have broken the moment anyone switched it
+on. `WarCounsel-OCR.zip` is attached to this release instead, and the build
+now proves the engine works by having it read a test image before shipping,
+rather than trusting that the pieces are present.
+
+`WarCounsel.exe` for v2.6.0 was built and released normally and is
+unaffected — the two are built separately on purpose. Everything else in
+v2.6.0, including the new Triggers panel, is unchanged and already in it.
+
+## v2.6.0 — 2026-08-08
+
+**Triggers you can actually set up.** Watching the log for the things you
+would otherwise miss now lives under **Settings ▸ Triggers**, instead of a
+JSON file you had to find and hand-edit. Add a row, pick what it watches,
+type the text — matches are plain text, so there is nothing to escape, and
+`*` catches every one of a kind.
+
+Five new things can be watched, all of which the app was already reading
+and simply had nowhere to report:
+
+- **your spell being interrupted**, and separately, **fizzling**
+- **someone else starting a cast** — a mob's cast line is the only warning
+  before it lands
+- **a raid mechanic firing**
+- **a mob being mesmerized**
+
+Charm and mez breaks were already possible and still are: watch `fade` for
+`Charm`. Each trigger says what its text is compared against, because a
+pattern aimed at the wrong part of the line fails silently forever.
+
+Also fixed: the trigger list showed nothing at all on a fresh install. The
+examples ship switched off, and the list was only reporting switched-on
+ones — so the one screen meant to explain the feature looked empty.
+
+**New download: `WarCounsel-OCR.zip`.** Reading your position off the screen
+was the one thing the single .exe could not do. It now can — as a separate
+download, because the image-recognition packages weigh about 200 MB against
+the app's 44 MB, and a one-file build unpacks everything on *every* launch.
+Folding them in would have slowed the start for everyone who never turns the
+feature on. The OCR build ships as a folder for the same reason: it unpacks
+once, not each time.
+
+`WarCounsel.exe` is unchanged — same download, same speed. Take the OCR one
+only if you want screen reading; both keep their data in the same place, so
+switching between them costs nothing.
+
+The settings panel used to answer "screen reading needs its optional
+packages: `pip install …`" for this, which could never work in the .exe and
+asked people with no Python to run a Python command. It now names the right
+download — or, in a source install, the exact interpreter to install into,
+since a plain `pip` frequently belongs to a different Python than the one
+running the app.
+
+## v2.5.3 — 2026-08-08
+
+**Fixed: the full install could fail with "'pip' is not recognized".** Windows
+ships a fake `python.exe` — a Microsoft Store shortcut that does nothing and
+*reports success* — and it is on your PATH by default. The installer believed
+it, skipped the offer to install Python, and then died on pip with no useful
+explanation. It now checks whether Python can say where it lives, which the
+fake one cannot.
+
+**It also stops asking you to install things you already have.** Python and
+Node.js are often installed but simply not on PATH (the python.org installer
+only adds it if you tick the box; Anaconda and Node both do this too). Both
+the installer and the launcher now look in the usual places before asking,
+and use what they find for that run — without changing your system PATH.
+
+**Fixed: the launcher could start the backend with the wrong Python.** It
+tried to activate its own environment, but that command quietly does nothing
+in a plain command window, so the backend started against an installation
+that had none of its dependencies and stopped with an import error. It now
+uses the environment's own Python directly.
+
+If you hit any of this, re-running `install_companion.bat` is enough — and
+INSTALL.md now lists the symptom, including how to switch the Store shortcuts
+off if you would rather clear them out.
+
+Nothing here affects the single .exe, which carries its own Python.
+
+## v2.5.2 — 2026-08-08
+
+**Fixed: 14 zones had no map or 3D geometry, including The Hole.** The Atlas
+looks a zone up by the name the log prints, and EQL prints the old long
+names — "The Ruins of Old Paineel" for The Hole, "The Liberated Citadel of
+Runnyeye", "Neriak - Commons" with a dash. None of those matched, so the
+panel said "no zone geometry for this place" for zones whose art was sitting
+in the game folder the whole time.
+
+Now charted and rendering: **The Hole**, The Warrens, Planes of Sky, Fear
+and Hate, the Temple of Solusek Ro, Runnyeye, the Lair of the Splitpaw, the
+Qeynos Aqueducts, the Castle of Mistmoore, and all three Neriak gates. Two
+of those (Mistmoore, Runnyeye) were broken by an entry that was *supposed*
+to help and instead hid a working one.
+
+Routing reaches the new zones too — The Hole and The Warrens connect through
+Paineel, the Temple through Lavastorm. Lake Nerius is still unmapped: it is
+the one EQL zone whose art ships in a format the 3D extractor does not read.
+
+Checked against the client's own zone list (`Resources/ZoneNames.txt`) —
+all 77 live zones now resolve. `scripts/zone_coverage.py` re-runs that check
+after a patch, so the next renamed zone shows up as a failure instead of an
+empty panel.
 
 ## v2.5.1 — 2026-08-04
 

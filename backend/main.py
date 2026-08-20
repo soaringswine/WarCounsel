@@ -18,8 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket,
-                     WebSocketDisconnect)
+from fastapi import (Body, Depends, FastAPI, HTTPException, Request,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -125,37 +125,6 @@ ocr_watcher: Optional[OcrWatcher] = None
 _character_id: Optional[int] = None
 _last_state_broadcast = 0.0
 ADVICE_CACHE_FILE = data_path("advice_cache.json")
-
-
-def _advisor_code_rev() -> str:
-    """Cached counsel must not outlive the knowledge encoded in the
-    prompts. A briefing is frozen at consult time and the checks AND
-    revisions deliberately review against the STORED briefing — so a
-    prompt correction never reaches an already-cached consult, and a
-    disproven claim keeps cascading through the whole chain (live case:
-    the exalt slot-restriction overclaim resurfaced in a gear revision a
-    day after the prompts were fixed, because the cached gear briefing
-    still asserted it). Hashing the advisor source folds "the prompts or
-    gates changed" into the consult signature: the tab then shows the
-    stale banner and the next Consult regenerates the briefing. Frozen
-    builds may not ship readable source — APP_VERSION covers those,
-    changing once per release."""
-    try:
-        from backend.agent import advisor as _adv
-        return hashlib.sha1(
-            Path(_adv.__file__).read_bytes()).hexdigest()[:10]
-    except Exception:
-        return APP_VERSION
-
-
-_ADVISOR_REV = None  # computed on first use; APP_VERSION is defined below
-
-
-def _sig_rev() -> str:
-    global _ADVISOR_REV
-    if _ADVISOR_REV is None:
-        _ADVISOR_REV = _advisor_code_rev()
-    return _ADVISOR_REV
 
 
 def _sig_norm(sig: tuple) -> tuple:
@@ -414,6 +383,14 @@ async def on_log_event(event: ev.LogEvent, live: bool) -> None:
                 "zone": tracker.zone, "level": tracker.level,
                 "class_str": tracker.class_str,
                 "aa_available": tracker.aa_available,
+                # A max_hp learned from the stats panel lived only in
+                # memory: the row was written when the player TYPED a
+                # value and never again, so a restart reloaded the typed
+                # number and ran on it until the panel was next read.
+                # Harmless while nothing depended on it -- hp_floor_pct
+                # now does, and a floor measured against a stale max
+                # reports a comfortable fight as a near-death.
+                "max_hp": tracker.max_hp, "max_mana": tracker.max_mana,
             })
         except asyncio.QueueFull:
             logger.warning("DB queue full — dropping %s milestone", event.type)
@@ -449,6 +426,12 @@ def _persist_milestone(item: dict) -> None:
                 row.aa_available = item["aa_available"]
             if item["class_str"]:
                 row.class_str = item["class_str"]
+            # a typed value still wins in the TRACKER, so this can
+            # never overwrite a deliberate statement with a reading
+            for f in ("max_hp", "max_mana"):
+                v = item.get(f)
+                if v and v > 0 and getattr(row, f, None) != v:
+                    setattr(row, f, v)
         db.commit()
     finally:
         db.close()
@@ -519,6 +502,8 @@ def _drain_finished_sessions() -> None:
                 "zone": view.get("zone"), "level": view.get("level"),
                 "class_str": view.get("class_str"),
                 "aa_available": tracker.aa_available,
+                "max_hp": tracker.max_hp,
+                "max_mana": tracker.max_mana,
             })
         except asyncio.QueueFull:
             logger.warning("DB queue full — dropping session record")
@@ -540,6 +525,14 @@ def _drain_finished_encounters() -> None:
                 "zone": tracker.zone, "level": tracker.level,
                 "class_str": tracker.class_str,
                 "aa_available": tracker.aa_available,
+                # A max_hp learned from the stats panel lived only in
+                # memory: the row was written when the player TYPED a
+                # value and never again, so a restart reloaded the typed
+                # number and ran on it until the panel was next read.
+                # Harmless while nothing depended on it -- hp_floor_pct
+                # now does, and a floor measured against a stale max
+                # reports a comfortable fight as a near-death.
+                "max_hp": tracker.max_hp, "max_mana": tracker.max_mana,
             })
         except asyncio.QueueFull:
             logger.warning("DB queue full — dropping encounter record")
@@ -635,9 +628,52 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.5.1"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.10.1"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+
+# Every module holding a prompt or a deterministic gate. advisor.py alone was
+# not enough: `scale_item_line`, `weapon_indices`, `proc_rates`,
+# `item_stat_vector` and the location gate live in game_data.py, and the
+# curated stacking lines in spell_lines.py -- so a fix to any of those left
+# the cache looking current, which is the same bug one file over. Packaged
+# builds never had the gap (APP_VERSION moves every release); this is for
+# source installs.
+_COUNSEL_SOURCES = ("backend.agent.advisor", "backend.game_data",
+                    "backend.spell_lines")
+
+
+def _advisor_code_revision() -> str:
+    """Revision of the prompts and deterministic gates used by counsel."""
+    if is_frozen():
+        return APP_VERSION
+    import importlib
+    h = hashlib.sha256()
+    seen = 0
+    for mod in _COUNSEL_SOURCES:
+        try:
+            f = importlib.import_module(mod).__file__
+            h.update(Path(f).read_bytes())
+            seen += 1
+        except (AttributeError, OSError, TypeError, ImportError):
+            continue
+    # Hashing NOTHING would hand every build the same constant and silently
+    # restore the bug, so fall back rather than return a hash of emptiness.
+    if not seen:
+        return APP_VERSION
+    return h.hexdigest()[:12]
+
+
+_ADVISOR_CODE_REV: Optional[str] = None
+
+
+def _advisor_revision() -> str:
+    global _ADVISOR_CODE_REV
+    if _ADVISOR_CODE_REV is None:
+        _ADVISOR_CODE_REV = _advisor_code_revision()
+    return _ADVISOR_CODE_REV
+
 
 app = FastAPI(title="WarCounsel", version=APP_VERSION, lifespan=lifespan)
 
@@ -939,10 +975,20 @@ async def generate_spellset(body: dict | None = None):
     """Write the advisor's Memorize-now list as an in-game spell set.
     One command in game then loads the whole bar: /memspellset <name>."""
     from backend import builds_data
-    from backend.spellsets import find_loadout_ini, write_spell_set
-    from backend.agent.advisor import _permanent_buffs, stack_gem_order
-    from backend.game_data import _primary_effect as game_data_primary
+    from backend.spellsets import (find_loadout_ini, write_spell_set,
+                                   GameRunning)
+    from backend.agent.advisor import (_is_prebuff, _permanent_buffs,
+                                       stack_gem_order)
     from backend.game_data import supersedes_for_slots
+    # Off unless the player switched it on. This is the only file the app
+    # writes inside the game folder, so it is their call to make, not the
+    # installer's -- and the gate lives here rather than only in the UI,
+    # because a button being hidden is not the same as an endpoint being
+    # closed.
+    if not settings.allow_spellset_write:
+        raise HTTPException(403, "Writing spell sets is switched off. Turn on "
+                                 "\"Write spell sets into the game folder\" "
+                                 "under Settings to enable it.")
     source = ((body or {}).get("source") or "loadout").strip()
     default_name = _set_name_for_trio(source)
     name = ((body or {}).get("name") or default_name).strip()[:24]
@@ -961,11 +1007,14 @@ async def generate_spellset(body: dict | None = None):
             if tracker.level is not None and s["level"] > tracker.level:
                 continue
             e = builds_data.spell_entry(s["name"])
-            if not e or e.get("targetTypeId") not in (6, 51):
-                continue  # beneficial self/ally only — no charms, no enemy DoTs
-            pe = game_data_primary(e)
-            if pe and pe[0] in (12, 13, 28):
-                continue  # invisibility lines (incl. IVU): situational
+            # ONE definition of "is this a pre-buff", shared with the
+            # advisor. This used to keep its own list and the two disagreed
+            # in both directions: it dropped see-invisibility, which the
+            # advisor kept, and it kept root and charm, which the advisor
+            # drops -- so /memspellset could write Treeform into a pre-buff
+            # bar and plant you in the ground.
+            if not e or not _is_prebuff(e):
+                continue
             t = e.get("durationTicks") or 0
             if t > 0:  # any timed buff — longest first fills toward 14
                 timed.append((t, s["name"]))
@@ -1037,13 +1086,113 @@ async def generate_spellset(body: dict | None = None):
                                  "(eqlbuilds snapshot missing?)")
     try:
         result = await asyncio.to_thread(write_spell_set, path, name, ids)
+    except GameRunning as e:
+        # 409, not 500: nothing is broken, the timing is simply wrong. This
+        # used to be a NOTE in the response telling the player that logging
+        # out overwrites the file -- advice they had to read and act on,
+        # which is not a guard. Sets saved in game were being lost until the
+        # player switched the whole feature off to stop it.
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(500, str(e))
     return {**result, "written": written, "skipped": skipped,
             "memspellset": f"/memspellset {name}",
-            "note": "The game reads this file at login — if the character "
-                    "is logged in, camp to character select and back "
-                    "before /memspellset (logging out overwrites the file)."}
+            "note": "Written while the game was closed, so it will be there "
+                    f"at login. In game: /memspellset {name}"}
+
+
+@app.get("/api/zone-items")
+async def get_zone_items():
+    """Wanted items that drop in the zone you are standing in.
+
+    Its own endpoint rather than part of /api/progression: the first call
+    mines an item page per candidate, and the Progression tab reads a local
+    file and should not wait on the wiki to render.
+    """
+    from backend import zone_items as zi
+    from backend import quests as quests_mod
+    inv = load_export(tracker.name, tracker.server, "Inventory")
+    items = (inv or {}).get("items") or []
+    held: dict = {}
+    for it in items:
+        n = (it.get("name") or "").strip()
+        if n:
+            held[n] = held.get(n, 0) + int(it.get("count") or 1)
+    rows = []
+    if items:
+        try:
+            rows = await quests_mod.quests_for_items(items, level=tracker.level)
+        except Exception:
+            logger.debug("zone-items: quest scan failed", exc_info=True)
+    try:
+        return await zi.worth_collecting(tracker.zone, rows, held)
+    except Exception as exc:
+        logger.exception("zone-items failed")
+        raise HTTPException(500, f"zone lookup failed: {str(exc)[:120]}")
+
+
+@app.get("/api/progression")
+async def get_progression():
+    """Achievement progress, read from the game's own /outputfile dump.
+
+    AUTHORITATIVE, and that is the point. Everyone else infers Plane of Sky
+    progress from an inventory dump, which is wrong in two directions: an
+    item already turned in has left your bags while its criterion stays
+    complete, and a class confirmed at creation autocompletes without the
+    items ever being held. The game answers per criterion; we read the
+    answer instead of guessing at it.
+
+    Sections come back in the file's own order with a `kind` tag so the UI
+    can lead with the interesting ones. Boilerplate criteria (the four
+    "autocompletes"/"can be bypassed" sentences) are flagged `note` by the
+    parser and excluded from `steps`, so a class unlock reads 6/6 and a
+    closest-to-done sort is not skewed by them.
+    """
+    d = load_export(tracker.name, tracker.server, "Achievements")
+    if not d:
+        return {"available": False, "sections": [],
+                "note": "No achievements export found — type "
+                        "/outputfile achievements in-game, then press "
+                        "check exports."}
+    # The file repeats itself: EverQuest: Keys and General: Keys are
+    # byte-identical. The parser already merges by name; this only decides
+    # what the UI leads with.
+    KIND = {"Untapped Potential: Classes": "class",
+            "Untapped Potential: Races": "race",
+            "Untapped Potential: Deity": "deity",
+            "EverQuest: Raids": "raid",
+            "EverQuest: Keys": "key", "General: Keys": "key",
+            "EverQuest: Progression": "faction",
+            "EverQuest: Exploration": "explore",
+            "EverQuest: Hunter": "hunter"}
+    # Grouped by KIND, not by the file's section names. Nine Tradeskill
+    # sections and four Slayer ones are one thing each to a player, and
+    # EverQuest: Keys / General: Keys are byte-identical duplicates -- so
+    # merging also has to dedupe by achievement name or Keys reads 0/8 when
+    # there are four keys in the game.
+    merged: dict = {}
+    order: list = []
+    for sec in d.get("sections") or []:
+        name = sec["section"]
+        kind = KIND.get(name,
+                        "tradeskill" if name.startswith("Tradeskill")
+                        else "slayer" if name.startswith("Slayer") else "other")
+        if kind not in merged:
+            merged[kind] = {"kind": kind, "section": name, "achievements": []}
+            order.append(kind)
+        seen = {a["name"] for a in merged[kind]["achievements"]}
+        merged[kind]["achievements"] += [a for a in sec["achievements"]
+                                         if a["name"] not in seen]
+    secs = []
+    for kind in order:
+        m = merged[kind]
+        m["total"] = len(m["achievements"])
+        m["done"] = sum(1 for a in m["achievements"] if a["done"])
+        secs.append(m)
+    return {"available": True, "sections": secs,
+            "done": d.get("done", 0), "count": d.get("count", 0),
+            "file": d.get("file"), "age_hours": d.get("age_hours"),
+            "pre_launch": d.get("pre_launch")}
 
 
 @app.get("/api/spellbook")
@@ -1612,6 +1761,10 @@ async def api_settings_get():
             "context": _context_info(),
         },
         "overrides": sorted(overrides().keys()),
+        # Reported as a real boolean, resolved the same way the endpoint
+        # resolves it -- so the switch cannot show one thing while the gate
+        # does another.
+        "allow_spellset_write": bool(settings.allow_spellset_write),
         # Bundled-data health. Packaged builds resolve these out of the
         # PyInstaller bundle, where a missing --add-data entry fails soft;
         # surfacing the counts lets the release build assert they arrived.
@@ -1633,6 +1786,7 @@ async def api_settings_set(body: dict):
     """Persist settings. Keys go to data/secrets.json, everything else to
     data/app_config.json; an omitted key field is left untouched, so saving
     other settings never has to resend a secret the UI was never shown."""
+    from backend.app_config import apply as apply_config
     from backend.app_config import update as update_config
     from backend.llm_runtime import clear_cache, set_active, active
     from backend.secrets_store import FIELDS as SECRET_FIELDS, update as update_secrets
@@ -1652,10 +1806,10 @@ async def api_settings_set(body: dict):
         game_changed = wanted != settings.eql_game_dir
     if config_in:
         update_config(config_in)
-        # apply in-memory so the change takes hold without a restart
-        for field, value in update_config({}).items():
-            if hasattr(settings, field):
-                setattr(settings, field, value)
+        # apply in-memory so the change takes hold without a restart, through
+        # the same coercion the startup validator uses -- this loop used to
+        # be written out here and assigned the raw string
+        apply_config(settings)
         if game_changed:
             game = Path(settings.eql_game_dir)
             settings.eql_log_dir = str(game / "Logs")
@@ -1663,7 +1817,14 @@ async def api_settings_set(body: dict):
             settings.eql_maps_custom_dir = str(game / "maps" / "Dark Brewall")
             clear_find_cache()
 
-    llm_touched = False
+    # SettingsModal sends the provider (and CLI effort fields) on every save.
+    # Snapshot what actually drives the current counsel so an unrelated save
+    # does not discard a consult, while a real active model/effort change does.
+    from backend.llm_runtime import effort_for, set_cli_prefs
+    active_before = active()
+    efforts_before = {
+        p: effort_for(p) for p in ("claude_cli", "codex_cli")
+    }
     if "llm_provider" in config_in:
         # Forward the model under the key THIS provider uses. Only openai
         # and custom were passed before, so for the others set_active saw
@@ -1677,21 +1838,26 @@ async def api_settings_set(body: dict):
                         "claude_cli": "claude_cli_model",
                         "codex_cli": "codex_cli_model"}
         set_active(prov, config_in.get(per_provider.get(prov, "")))
-        llm_touched = True
     # keep the runtime layer in step: llm_config wins over settings at use
     # time, so an effort saved here must also land there or a stale runtime
     # choice silently shadows it
-    from backend.llm_runtime import set_cli_prefs
     for cli_p in ("claude_cli", "codex_cli"):
         if f"{cli_p}_effort" in config_in:
             set_cli_prefs(cli_p, effort=str(config_in[f"{cli_p}_effort"]))
-            llm_touched = True
-    if llm_touched:
-        # effort rides the briefing the same way the model does, so a
-        # changed one invalidates a cached consult just as a switch does
+    active_after = active()
+    active_effort_changed = (
+        active_after["provider"] in efforts_before
+        and efforts_before[active_after["provider"]]
+        != effort_for(active_after["provider"])
+    )
+    if active_before != active_after or active_effort_changed:
+        # Effort rides the briefing the same way the model does, so a real
+        # active-provider effort change invalidates cached counsel too.
         global _advice_cache, _gear_cache
         _advice_cache = None
         _gear_cache = None
+        logger.info("Advisor runtime changed (%s -> %s) — consults cleared",
+                    active_before, active_after)
 
     restarted = False
     if game_changed:
@@ -1769,11 +1935,16 @@ async def get_advisor(refresh: bool = False, cached: bool = False):
            book["updated"] if book else None, tracker._last_aa_seen,
            inv_sig["updated"] if inv_sig else None,
            miss_sig["updated"] if miss_sig else None,
-           _sig_rev())
+           _advisor_revision())
     sig = _sig_norm(sig)
     if _advice_cache is not None and _advice_sig == sig and not refresh:
         return {**_advice_cache, "stale": False}
     if cached:
+        # Memory can be cleared while the persisted copy is intact (a
+        # provider switch or reload). Recover that copy before reporting that
+        # the consult disappeared; moved context still returns it as stale.
+        if _advice_cache is None:
+            _load_advice_cache()
         # serve the last counsel even when the context moved on (zone/level/
         # exports) — marked stale so the tab can offer a reconsult instead
         # of forcing one
@@ -1895,6 +2066,74 @@ async def advisor_revise():
     return revised
 
 
+def _items_including_pet(inv) -> list:
+    """Owned items, with what the PET is holding folded in.
+
+    Pet gear arrives from `/pet inventory check` and lives on the tracker,
+    not in the inventory export, so the gear advisor never saw it. That is
+    one-directional in a way nobody would choose: the app happily tells you
+    to hand a better item DOWN to the pet, while a Ringmail Coat +6 sits on
+    the pet and the player wears worse.
+
+    Marked `where: "pet"` so a recommendation says where the item actually
+    is -- taking it back off the pet is a real action with a cost, and the
+    row should say so rather than implying it is sitting in a bag.
+    """
+    items = list((inv or {}).get("items") or [])
+    for slot, name in (getattr(tracker, "pet_inventory", None) or {}).items():
+        if not name or str(name).strip().lower() in ("empty", "none"):
+            continue
+        items.append({"name": str(name), "where": "pet", "loc": f"pet:{slot}"})
+    return items
+
+
+@app.get("/api/panel/prefs")
+async def get_panel_prefs():
+    """What each web panel shows, plus the schema the UI renders from."""
+    from backend import panel_prefs
+    return panel_prefs.schema()
+
+
+@app.post("/api/panel/prefs")
+async def post_panel_prefs(body: dict):
+    """Merge a partial change. A preset name replaces the lot."""
+    from backend import panel_prefs
+    if body.get("preset"):
+        return {"prefs": panel_prefs.apply_preset(str(body["preset"]))}
+    return {"prefs": panel_prefs.save(body or {})}
+
+
+@app.get("/api/quests")
+async def get_quests():
+    """Owned items matched to the quests that reference them.
+
+    Read-only and wiki-cached: the same item pages the gear hover cards
+    already mine, joined to quest pages for the giver, zone, level and
+    reward. Deliberately no progress percentage -- required counts live in
+    walkthrough prose, and a number scraped from a sentence would send
+    someone farming the wrong amount.
+    """
+    from backend import quests as quests_mod
+    inv = load_export(tracker.name, tracker.server, "Inventory")
+    items = (inv or {}).get("items") or []
+    if not items:
+        return {"quests": [], "note": "No inventory export found — type "
+                                      "/outputfile inventory in-game, then "
+                                      "press check exports."}
+    try:
+        rows = await quests_mod.quests_for_items(items, level=tracker.level)
+    except Exception as exc:
+        logger.exception("quest scan failed")
+        raise HTTPException(500, f"quest scan failed: {str(exc)[:120]}")
+    names = sorted({str(i.get("name")) for i in items if i.get("name")})
+    # The NAMES, not just the count. Searching the tab for something you
+    # just looted has three honest answers -- a quest wants it, you are
+    # carrying it and no quest page mentions it, or it is not in your bags
+    # at all -- and the panel cannot tell the last two apart from a count.
+    return {"quests": rows, "items_scanned": len(names), "items": names,
+            "level": tracker.level}
+
+
 @app.get("/api/gear")
 async def get_gear(refresh: bool = False, cached: bool = False):
     """Equipment counsel: best owned item per slot + farming targets.
@@ -1912,11 +2151,14 @@ async def get_gear(refresh: bool = False, cached: bool = False):
     sig = (tracker.class_str, tracker.level, tracker.race, tracker.pet_slots,
            tuple(sorted(tracker.pet_inventory.items())),
            inv["updated"] if inv else None,
-           _sig_rev())
+           _advisor_revision())
     sig = _sig_norm(sig)
     if _gear_cache is not None and _gear_sig == sig and not refresh:
         return {**_gear_cache, "stale": False}
     if cached:
+        if _gear_cache is None:
+            _load_advice_cache()   # one file holds both
+
         if _gear_cache is not None:
             return {**_gear_cache, "stale": True}
         return {"cached": False}
@@ -1936,7 +2178,7 @@ def _gear_ctx(inv=None) -> dict:
     return {"class_str": tracker.class_str, "level": tracker.level,
             "race": tracker.race, "playstyle": tracker.playstyle,
             "worn": (inv or {}).get("worn"),
-            "inventory_items": (inv or {}).get("items"),
+            "inventory_items": _items_including_pet(inv),
             "exaltations": (inv or {}).get("exaltations"),
             "item_sockets": (inv or {}).get("item_sockets"),
             "loot_filter": lf["actions"] if lf else None,
@@ -2305,10 +2547,30 @@ async def get_lifetime(db: Session = Depends(get_db)):
 
 @app.get("/api/tracked-rules")
 async def get_tracked_rules():
-    """The user's alert rules (edit data/tracked_rules.json by hand —
-    substring matches on loot/kill/death/zone; reloaded on save)."""
+    """The user's alert rules, plus the schema the settings panel renders.
+
+    Returns DISABLED rules too — they are exactly what an editor exists to
+    switch back on, and the seeded examples all ship disabled, so the
+    enabled-only view reported an empty list on every fresh install.
+    """
     from backend import alerts
-    return {"file": str(alerts.RULES_FILE), "rules": alerts.load_rules()}
+    return {"file": str(alerts.RULES_FILE), "rules": alerts.all_rules(),
+            "kinds": [{"kind": k, "matches": alerts.KIND_HELP.get(k, "")}
+                      for k in alerts.KINDS]}
+
+
+@app.post("/api/tracked-rules")
+async def post_tracked_rules(payload: dict = Body(...)):
+    """Replace the rule set. The editor owns the whole table (see
+    alerts.save); the file is written atomically and every reader picks it
+    up by mtime, including the overlay in its own process."""
+    from backend import alerts
+    rules = payload.get("rules")
+    if not isinstance(rules, list):
+        raise HTTPException(status_code=400, detail="rules must be a list")
+    saved = alerts.save(rules)
+    dropped = len(rules) - len(saved)
+    return {"rules": saved, "dropped": dropped}
 
 
 @app.get("/api/loot-filter")
@@ -2325,9 +2587,16 @@ async def get_loot_filter():
 @app.get("/api/item-acquisition")
 async def get_item_acquisition(name: str):
     """Where an item comes from (drops/vendors/quests/crafting) — feeds
-    the gear-tab hover cards. Wiki-mined, cached."""
-    from backend.game_data import item_acquisition
-    return await item_acquisition(name)
+    the gear-tab hover cards. Wiki-mined, cached.
+
+    Carries the BASE stat line too. "Is this reward worth farming for" is
+    the question a hover card is opened to answer, and acquisition alone
+    cannot answer it. Base (+0) values deliberately: the card is most often
+    opened on something not owned yet, and there is no rank to scale to.
+    """
+    from backend.game_data import item_acquisition, item_line
+    acq, line = await asyncio.gather(item_acquisition(name), item_line(name))
+    return {**(acq or {}), "stats": line or None}
 
 
 @app.get("/api/map")
