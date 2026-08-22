@@ -194,6 +194,32 @@ def _gate_reason_claims(picks: List[dict]) -> None:
         pick["reason"] = f"{reason} [{note}]"
         logger.info("Annotated %s: reason claims damage, effects show none",
                     name)
+def _capability_line(ctx: dict) -> Optional[str]:
+    """What the trio can and cannot DO, as capabilities rather than spells.
+
+    This is the one thing a spell list does not yield by being read more
+    carefully: "no snare and no SoW" is a fact about the three classes
+    together, it rules out kiting and makes travel slow, and it never falls
+    out of considering spells one at a time. Same for "slow at 9" being an
+    early power spike worth planning around.
+
+    No snapshot means the line is OMITTED, not emitted empty. An advisor
+    that says a trio lacks everything because a file failed to load is worse
+    than one that never mentions capabilities at all.
+    """
+    from backend.capabilities import trio_capability_line
+    classes = [x.strip() for x in (ctx.get("class_str") or "").split("/")
+               if x.strip()]
+    line = trio_capability_line(classes, ctx.get("level"))
+    if not line:
+        return None
+    return ("- Trio CAPABILITIES — what these three classes can and cannot "
+            "do BETWEEN them; the level is when it first becomes available. "
+            "Treat LACKS as hard constraints on the plan (no snare and no "
+            "SoW rules out kiting and makes travel slow; no ports means "
+            "every trip is on foot). A capability listed without a level is "
+            "one they have NOW — the source records no level for it, "
+            "which is NOT the same as not having it:\n" + line)
 
 
 def _build_prompt(ctx: dict, wiki: str) -> str:
@@ -206,6 +232,9 @@ def _build_prompt(ctx: dict, wiki: str) -> str:
         f"- Unspent AA points: {_known(ctx.get('aa_available'))}",
         f"- Recent log activity: {ctx.get('recent_activity') or 'none'}",
     ]
+    caps = _capability_line(ctx)
+    if caps:
+        lines.append(caps)
     aas = ctx.get("owned_aas") or {}
     if aas:
         aal = "; ".join(
@@ -1932,7 +1961,9 @@ async def generate_advice(ctx: dict, reply_json: Optional[dict] = None,
             ctx["_hunting"] = []
         ctx["_permanent"] = _permanent_buffs(ctx)
         ctx["_long_buffs"] = _long_buffs(ctx)
-        ctx["_no_pet"] = not _summons_a_pet(classes)
+        # is False, not "not True": an unknown pet answer must not put
+        # "NO PET" in the prompt as though it were established.
+        ctx["_no_pet"] = _summons_a_pet(classes) is False
         ctx["_measured"] = _measured_damage(ctx)
         # Deterministic pre-pass: only offer the model spells that can survive
         # its own output gates, so a loadout slot is never spent on a pick
@@ -2688,17 +2719,12 @@ def _measured_damage(ctx: dict) -> List[str]:
             for _t, n, v in rows[:10]]
 
 
-def _summons_a_pet(classes: List[str]) -> bool:
-    """Does any class in the trio actually summon a pet?
-
-    Pet-support spells target the pet slot (target type 14) and are useless
-    without one. A Paladin/Druid/Monk was told to slot Tiny Companion --
-    "improves pet mobility" -- with no pet to improve: none of those three
-    summons anything. A druid CAN charm an animal, which is a pet of sorts,
-    but a charm is a fight-by-fight decision and not a reason to spend two
-    of fourteen combat gems on pet utility.
-    """
+def _pet_from_spells(classes: List[str]) -> Optional[bool]:
+    """Pet-summoning read off the eqlbuilds spell snapshot. None = no
+    snapshot, which is NOT the same as no pet -- see _summons_a_pet."""
     from backend import builds_data
+    if builds_data.classes_data() is None:
+        return None
     for c in classes or []:
         for sp in (builds_data.class_spells(c) or []):
             if any(f.get("effectId") in (33, 71)
@@ -2707,9 +2733,52 @@ def _summons_a_pet(classes: List[str]) -> bool:
     return False
 
 
+def _summons_a_pet(classes: List[str]) -> Optional[bool]:
+    """Does any class in the trio actually have a pet? None = unknown.
+
+    Pet-support spells target the pet slot (target type 14) and are useless
+    without one. A Paladin/Druid/Monk was told to slot Tiny Companion --
+    "improves pet mobility" -- with no pet to improve: none of those three
+    summons anything. A druid CAN charm an animal, which is a pet of sorts,
+    but a charm is a fight-by-fight decision and not a reason to spend two
+    of fourteen combat gems on pet utility.
+
+    TWO sources now, because the spell scan alone got it wrong in both
+    directions:
+
+    - It said a BEASTLORD has no pet. Nothing in the snapshot's Beastlord
+      list carries effect 33 or 71 -- the warder is not a spell-summoned pet
+      there -- so a BST/MNK/WAR trio had Tiny Companion, a Beastlord spell,
+      dropped out of its own loadout. It survived only when a Shaman or
+      another real summoner happened to be in the trio. That is the exact
+      spell this function was written to protect, removed from the one
+      class it belongs to.
+    - With no snapshot at all it returned False, so a MAGICIAN counted as
+      pet-less and lost every pet spell. Absence of evidence read as
+      evidence of absence, which is the rule the gear gates already live by.
+
+    So: either source saying yes is yes; only a source that actually
+    answered can say no; neither knowing is None, and callers must treat
+    None as "leave it alone".
+    """
+    from backend.capabilities import trio_capabilities
+    caps = trio_capabilities(classes)
+    table = None if caps is None else any(
+        h["name"] == "pets" for h in caps["has"])
+    scan = _pet_from_spells(classes)
+    if table or scan:
+        return True
+    if table is None and scan is None:
+        return None
+    return False
+
 def _gate_pet_spells(picks: list, classes: List[str]) -> list:
-    """Drop pet-targeted spells when nothing in the trio has a pet."""
-    if _summons_a_pet(classes):
+    """Drop pet-targeted spells when the trio is KNOWN to have no pet.
+
+    Unknown leaves the picks alone: dropping a spell needs proof there
+    is no pet, not merely the absence of proof that there is one.
+    """
+    if _summons_a_pet(classes) is not False:
         return picks
     from backend import builds_data
     out = []

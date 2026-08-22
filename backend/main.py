@@ -628,7 +628,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-APP_VERSION = "2.10.1"  # bump together with frontend/lib/version.ts
+APP_VERSION = "2.11.0"  # bump together with frontend/lib/version.ts
 GITHUB_REPO = "EKirschmann/WarCounsel"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -641,7 +641,14 @@ RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 # builds never had the gap (APP_VERSION moves every release); this is for
 # source installs.
 _COUNSEL_SOURCES = ("backend.agent.advisor", "backend.game_data",
-                    "backend.spell_lines")
+                    "backend.spell_lines", "backend.capabilities")
+
+# ...and every DATA file a prompt is built from. Hashing only modules
+# leaves the same gap again one layer down: refreshing the vendored
+# capability snapshot changes what the advisor is told without changing
+# a single line of code, and the cache would go on reporting stale:
+# false. Missing files are skipped, not fatal.
+_COUNSEL_DATA = (bundle_path("backend", "picker_capabilities.json"),)
 
 
 def _advisor_code_revision() -> str:
@@ -657,6 +664,12 @@ def _advisor_code_revision() -> str:
             h.update(Path(f).read_bytes())
             seen += 1
         except (AttributeError, OSError, TypeError, ImportError):
+            continue
+    for path in _COUNSEL_DATA:
+        try:
+            h.update(Path(path).read_bytes())
+            seen += 1
+        except OSError:
             continue
     # Hashing NOTHING would hand every build the same constant and silently
     # restore the bug, so fall back rather than return a hash of emptiness.
@@ -1679,23 +1692,65 @@ async def api_llm_checks_set(body: dict):
 
 def _describe_game_dir(path: str) -> dict:
     """Is this folder a usable EQL install? The settings panel shows this
-    verdict before saving, so nobody has to guess why nothing is tracked."""
+    verdict before saving, so nobody has to guess why nothing is tracked.
+
+    `ok` answers "is this the install folder", NOT "is there anything to
+    read yet" -- one flag meant both until #12, and the save gate rejects
+    anything not `ok`. A folder is only PROVEN to hold logs after /log on,
+    and a first run legitimately has no Logs folder at all, so a correct
+    path could not be stored until the player had already gone in-game --
+    which they cannot be told to do by an app that will not accept it.
+    An install with nothing to tail is now `warn`: saved, and said out loud.
+    Only a folder that is not an EQL install still fails.
+    """
+    from backend.config import _looks_like_eql
     p = Path(path) if path else None
     if not p or not p.is_dir():
-        return {"path": path, "ok": False, "reason": "Folder does not exist"}
+        return {"path": path, "ok": False, "warn": False,
+                "reason": "Folder does not exist"}
+    if not _looks_like_eql(p):
+        return {"path": str(p), "ok": False, "warn": False,
+                "reason": "No eqgame.exe, eqclient.ini or Logs folder "
+                          "here - is this the EverQuest Legends install "
+                          "folder?"}
     logs = p / "Logs"
     if not logs.is_dir():
-        return {"path": str(p), "ok": False,
-                "reason": "No Logs folder here - is this the EverQuest "
-                          "Legends install folder?"}
+        return {"path": str(p), "ok": True, "warn": True, "logs": str(logs),
+                "log_count": 0,
+                "reason": "Install found. No Logs folder yet - type "
+                          "/log on in-game once and it will appear."}
     found = sorted(logs.glob("eqlog_*.txt"))
     if not found:
-        return {"path": str(p), "ok": False, "logs": str(logs),
-                "reason": "Logs folder has no eqlog_*.txt yet - type "
-                          "/log on in-game once."}
-    return {"path": str(p), "ok": True, "logs": str(logs),
+        return {"path": str(p), "ok": True, "warn": True, "logs": str(logs),
+                "log_count": 0,
+                "reason": "Install found. Logs folder has no eqlog_*.txt "
+                          "yet - type /log on in-game once."}
+    return {"path": str(p), "ok": True, "warn": False, "logs": str(logs),
             "log_count": len(found),
             "reason": f"{len(found)} character log(s) found"}
+
+
+def _repoint_packs(current: str, maps: Path) -> str:
+    """Carry the installed map packs across a game-folder change.
+
+    Picking a new install used to assign Dark Brewall and nothing else,
+    so a multi-pack list was silently emptied -- the packs stayed on
+    disk and merely stopped being searched, which reads as maps going
+    missing rather than as a setting being reset. Packs that lived in
+    the OLD maps folder follow the move by name; one kept deliberately
+    somewhere else is left where the user put it.
+    """
+    kept = []
+    for raw in str(current or "").split(";"):
+        entry = raw.strip()
+        if not entry:
+            continue
+        p = Path(entry)
+        if p.is_absolute() and p.parent.name.lower() == "maps":
+            kept.append(p.name)
+        else:
+            kept.append(entry)
+    return ";".join(kept or ["Dark Brewall"])
 
 
 def _context_info() -> dict:
@@ -1800,6 +1855,8 @@ async def api_settings_set(body: dict):
     game_changed = False
     if "eql_game_dir" in config_in:
         wanted = str(config_in["eql_game_dir"] or "").strip()
+        # Blocks only a folder that is not an install; "no logs yet" is a
+        # `warn` and saves, so the path can be set BEFORE /log on (#12).
         verdict = _describe_game_dir(wanted) if wanted else {"ok": True}
         if wanted and not verdict.get("ok"):
             raise HTTPException(400, verdict.get("reason", "Unusable folder"))
@@ -1813,8 +1870,10 @@ async def api_settings_set(body: dict):
         if game_changed:
             game = Path(settings.eql_game_dir)
             settings.eql_log_dir = str(game / "Logs")
-            settings.eql_maps_dir = str(game / "maps")
-            settings.eql_maps_custom_dir = str(game / "maps" / "Dark Brewall")
+            maps = game / "maps"
+            settings.eql_maps_dir = str(maps)
+            settings.eql_maps_custom_dir = _repoint_packs(
+                settings.eql_maps_custom_dir, maps)
             clear_find_cache()
 
     # SettingsModal sends the provider (and CLI effort fields) on every save.
@@ -2552,11 +2611,17 @@ async def get_tracked_rules():
     Returns DISABLED rules too — they are exactly what an editor exists to
     switch back on, and the seeded examples all ship disabled, so the
     enabled-only view reported an empty list on every fresh install.
+
+    "starter" is a CATALOGUE, not the user's rules: rows the panel can
+    offer to add. It is never written to the file by itself.
     """
     from backend import alerts
     return {"file": str(alerts.RULES_FILE), "rules": alerts.all_rules(),
             "kinds": [{"kind": k, "matches": alerts.KIND_HELP.get(k, "")}
-                      for k in alerts.KINDS]}
+                      for k in alerts.KINDS],
+            # Offered, never applied: the panel copies a row in on
+            # request. Seeding more would reach fresh installs only.
+            "starter": alerts.starter_set()}
 
 
 @app.post("/api/tracked-rules")
