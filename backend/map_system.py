@@ -278,6 +278,9 @@ ZONE_ALIASES = {
     "clan runnyeye": "Runnyeye Citadel",
     "liberated citadel of runnyeye": "Runnyeye Citadel",
     "castle of mistmoore": "Castle Mistmoore",
+    # Keep the shorter log/display variant too; both resolve to the canonical
+    # graph and map key.
+    "castle mistmoore": "Castle Mistmoore",
     "lair of the splitpaw": "Splitpaw Lair",
     "qeynos aqueduct system": "Qeynos Catacombs",
     # EQL punctuates the Neriak gates with a dash
